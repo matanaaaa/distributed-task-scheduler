@@ -1,0 +1,11 @@
+# runtime data
+/data/
+
+# local demo files
+demo.txt
+demo_task.zip
+*_task.zip
+*_result.zip
+
+# logs
+*.log
