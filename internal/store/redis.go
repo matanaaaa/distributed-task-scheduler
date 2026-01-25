@@ -27,8 +27,11 @@ func (s *RedisStore) Ping(ctx context.Context) error {
 func taskKey(id string) string { return fmt.Sprintf("task:%s", id) }
 
 func (s *RedisStore) SaveTask(ctx context.Context, id string, fields map[string]any) error {
-	// HSET task:{id} ...
 	return s.rdb.HSet(ctx, taskKey(id), fields).Err()
+}
+
+func (s *RedisStore) UpdateTask(ctx context.Context, id string, fields map[string]any) error {
+    return s.rdb.HSet(ctx, taskKey(id), fields).Err()
 }
 
 func (s *RedisStore) GetTask(ctx context.Context, id string) (map[string]string, error) {

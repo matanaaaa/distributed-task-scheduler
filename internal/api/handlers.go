@@ -167,3 +167,142 @@ func boolToStr(b bool) string {
 	}
 	return "false"
 }
+
+type ReportStatusReq struct {
+    Phase    string `json:"phase"`
+    Progress int    `json:"progress"`
+    Msg      string `json:"msg"`
+    Status   string `json:"status"` // optional: running/success/failed
+}
+
+func (h *Handler) ReportTaskStatus(c *gin.Context) {
+    ctx := context.Background()
+    id := c.Param("id")
+
+    // 确认 task 存在
+    m, err := h.S.Store.GetTask(ctx, id)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "redis error", "detail": err.Error()})
+        return
+    }
+    if len(m) == 0 {
+        c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+        return
+    }
+
+    var req ReportStatusReq
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json", "detail": err.Error()})
+        return
+    }
+
+    fields := map[string]any{
+        "updated_at": time.Now().UTC().Format(time.RFC3339),
+    }
+    if req.Phase != "" {
+        fields["phase"] = req.Phase
+    }
+    if req.Msg != "" {
+        fields["msg"] = req.Msg
+    }
+    if req.Progress >= 0 && req.Progress <= 100 {
+        fields["progress"] = req.Progress
+    }
+    if req.Status != "" {
+        // 允许 running/success/failed
+        switch req.Status {
+        case "queued", "running", "success", "failed":
+            fields["status"] = req.Status
+        default:
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status"})
+            return
+        }
+    }
+
+    if err := h.S.Store.UpdateTask(ctx, id, fields); err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update task", "detail": err.Error()})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func (h *Handler) UploadTaskResult(c *gin.Context) {
+    ctx := context.Background()
+    id := c.Param("id")
+
+    // 确认 task 存在
+    m, err := h.S.Store.GetTask(ctx, id)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "redis error", "detail": err.Error()})
+        return
+    }
+    if len(m) == 0 {
+        c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+        return
+    }
+
+    if err := ensureDirs(h.S.DataDir); err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create data dirs", "detail": err.Error()})
+        return
+    }
+
+    fh, err := c.FormFile("result_file")
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "result_file is required"})
+        return
+    }
+
+    resultName := id + "_result.zip"
+    resultPath := filepath.Join(h.S.resultsDir(), resultName)
+
+    if err := c.SaveUploadedFile(fh, resultPath); err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save result zip", "detail": err.Error()})
+        return
+    }
+
+    now := time.Now().UTC().Format(time.RFC3339)
+    fields := map[string]any{
+        "result_name": resultName,
+        "status":      "success",
+        "phase":       "result_uploaded",
+        "progress":    100,
+        "updated_at":  now,
+        "finished_at": now,
+    }
+    if err := h.S.Store.UpdateTask(ctx, id, fields); err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update task", "detail": err.Error()})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{"status": "ok", "result_name": resultName})
+}
+
+func (h *Handler) DownloadTaskResult(c *gin.Context) {
+    ctx := context.Background()
+    id := c.Param("id")
+
+    m, err := h.S.Store.GetTask(ctx, id)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "redis error", "detail": err.Error()})
+        return
+    }
+    if len(m) == 0 {
+        c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+        return
+    }
+
+    resultName := m["result_name"]
+    if resultName == "" {
+        resultName = id + "_result.zip"
+    }
+
+    resultPath := filepath.Join(h.S.resultsDir(), resultName)
+    if _, err := os.Stat(resultPath); err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "result zip not found"})
+        return
+    }
+
+    c.FileAttachment(resultPath, resultName)
+}
+
