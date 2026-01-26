@@ -1,11 +1,19 @@
 # runtime data
 /data/
+unzipped/
 
 # local demo files
 demo.txt
 demo_task.zip
 *_task.zip
 *_result.zip
+resp.txt
+result
+result.txt
+result.zip
+demo.txt
+demo_task.zip
 
 # logs
 *.log
+
