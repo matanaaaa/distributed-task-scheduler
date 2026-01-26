@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
@@ -21,7 +22,10 @@ func main() {
 		log.Fatalf("[worker] redis ping failed: %v", err)
 	}
 
-	w := worker.New(rdb)
+	apiBase := "http://localhost:8090"
+
+	w := worker.New(rdb, apiBase, cfg.DataDir, 10*time.Second)
+	
 	if err := w.Run(context.Background()); err != nil {
 		log.Fatal(err)
 	}

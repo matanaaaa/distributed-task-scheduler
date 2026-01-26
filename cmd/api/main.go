@@ -23,6 +23,8 @@ func main() {
 		Store:   st,
 		DataDir: cfg.DataDir,
 	}
+	log.Printf("[api] DataDir=%s", svc.DataDir)
+
 	h := &api.Handler{S: svc}
 
 	r := gin.Default()

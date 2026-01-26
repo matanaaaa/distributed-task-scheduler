@@ -9,7 +9,9 @@ Client → API (Gin) → Redis
 - **List**: `queue:high`, `queue:normal` (priority queues)
 - **Hash**: `task:{id}` (task metadata & status)
 
-Worker → `BLPOP` queues → update `task:{id}.status` (`queued → running → success`)
+Worker → BLPOP queues → POST /tasks/:id/status (running → uploading → success/failed)
+Worker → generate a fake result.zip → POST /tasks/:id/result upload
+API persists result to data/results/ and serves download via GET /tasks/:id/result
 
 ## Tech Stack
 
@@ -64,7 +66,17 @@ curl.exe http://localhost:8090/tasks/<task_id>
 curl.exe -OJ http://localhost:8090/tasks/<task_id>/download
 ```
 
-### (v0.3) Report status
+### (v0.3) Auto worker closed-loop: status + result
+
+#### Download original result zip
+
+```bash
+curl.exe -L -o .\<task_id>\_result.zip http://localhost:8090/tasks/<task_id>/result
+Expand-Archive -Path .\da9b350b-765d-491f-9477-59d195782454_result.zip -DestinationPath .\unzipped -Force
+Get-Content .\unzipped\result.txt
+```
+
+### (v0.3) previous edition : status report + result upload/download
 
 ```bash
 //生成一个demo.txt，压缩成demo_task.zip
@@ -106,4 +118,4 @@ curl.exe -OJ http://localhost:8090/tasks/<task_id>/result
 
 - v0.1: API supports task create/query/download; enqueue into Redis priority queues (queue:high/queue:normal)
 - v0.2: worker consumes queues and updates task status
-- v0.3: status report + result upload/download
+- v0.3: worker auto status + result upload/download

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"log"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -256,11 +257,18 @@ func (h *Handler) UploadTaskResult(c *gin.Context) {
     resultName := id + "_result.zip"
     resultPath := filepath.Join(h.S.resultsDir(), resultName)
 
+	wd, _ := os.Getwd()
+	log.Printf("[api] wd=%s dataDir=%s resultsDir=%s resultPath=%s",
+		wd, h.S.DataDir, h.S.resultsDir(), resultPath,
+	)
+
     if err := c.SaveUploadedFile(fh, resultPath); err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save result zip", "detail": err.Error()})
+		log.Printf("[api] SaveUploadedFile failed: %v", err)
         return
     }
-
+	log.Printf("[api] SaveUploadedFile OK: %s", resultPath)
+	
     now := time.Now().UTC().Format(time.RFC3339)
     fields := map[string]any{
         "result_name": resultName,
@@ -298,6 +306,12 @@ func (h *Handler) DownloadTaskResult(c *gin.Context) {
     }
 
     resultPath := filepath.Join(h.S.resultsDir(), resultName)
+
+	wd, _ := os.Getwd()
+	log.Printf("[api] wd=%s dataDir=%s resultsDir=%s resultPath=%s",
+		wd, h.S.DataDir, h.S.resultsDir(), resultPath,
+	)
+
     if _, err := os.Stat(resultPath); err != nil {
         c.JSON(http.StatusNotFound, gin.H{"error": "result zip not found"})
         return
