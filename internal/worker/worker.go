@@ -3,7 +3,9 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -11,31 +13,36 @@ import (
 )
 
 type QueueMsg struct {
-	TaskID  string `json:"task_id"`
-	ZipName string `json:"zip_name"`
-	TaskType string `json:"task_type,omitempty"`
-	Priority string `json:"priority,omitempty"`
+	TaskID    string `json:"task_id"`
+	ZipName   string `json:"zip_name"`
+	TaskType  string `json:"task_type,omitempty"`
+	Priority  string `json:"priority,omitempty"`
 }
 
 type Worker struct {
-	RDB *redis.Client
+	RDB         *redis.Client
 	apiBaseURL  string
 	dataDir     string
 	httpTimeout time.Duration
+
+	workerID string
 }
 
 func New(rdb *redis.Client, apiBaseURL, dataDir string, httpTimeout time.Duration) *Worker {
+	host, _ := os.Hostname()
+	wid := fmt.Sprintf("%s-%d", host, os.Getpid())
+
 	return &Worker{
 		RDB:         rdb,
 		apiBaseURL:  apiBaseURL,
 		dataDir:     dataDir,
 		httpTimeout: httpTimeout,
+		workerID:    wid,
 	}
 }
 
-
 func (w *Worker) Run(ctx context.Context) error {
-	log.Printf("[worker] started. waiting for tasks... api=%s", w.apiBaseURL)
+	log.Printf("[worker] started. waiting for tasks... api=%s worker_id=%s", w.apiBaseURL, w.workerID)
 
 	for {
 		select {
@@ -44,10 +51,8 @@ func (w *Worker) Run(ctx context.Context) error {
 		default:
 		}
 
-		// 阻塞取任务：先 high 再 normal
 		res, err := w.RDB.BLPop(ctx, 0, "queue:high", "queue:normal").Result()
 		if err != nil {
-			// ctx cancel 时 BLPop 也会返回 error
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -55,7 +60,6 @@ func (w *Worker) Run(ctx context.Context) error {
 			time.Sleep(1 * time.Second)
 			continue
 		}
-		// res = [queueName, value]
 		if len(res) != 2 {
 			continue
 		}
@@ -77,7 +81,6 @@ func (w *Worker) Run(ctx context.Context) error {
 
 		if err := w.handleOne(ctx, msg); err != nil {
 			log.Printf("[worker] task failed: task_id=%s err=%v", msg.TaskID, err)
-			// 失败也不退出，继续拉下一个
 		}
 	}
 }
@@ -86,6 +89,19 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 	taskID := msg.TaskID
 	taskKey := "task:" + taskID
 
+	// === 幂等锁：防并发重复执行 ===
+	const lockTTL = 300 * time.Second
+	ok, err := w.acquireTaskLock(ctx, taskID, lockTTL)
+	if err != nil {
+		return fmt.Errorf("acquire task lock failed: %w", err)
+	}
+	if !ok {
+		// 抢不到锁：说明同一任务正在被其它 worker 跑（或刚跑过/重试并发）
+		return nil
+	}
+	// 用 Background，避免 ctx cancel 导致锁无法释放
+	defer w.releaseTaskLock(context.Background(), taskID)
+
 	// 1) 上报 running（HTTP）
 	_ = w.reportStatus(taskID, statusPayload{
 		Phase:    "running",
@@ -93,8 +109,9 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 		Msg:      "picked by worker",
 		Status:   "running",
 	})
-	//方便验证观察
-	time.Sleep(5 * time.Second)
+
+	// 方便验证观察（你要就保留）
+	time.Sleep(30 * time.Second)
 
 	// 2) 同步更新 Redis 状态
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -128,10 +145,8 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 		}).Err()
 		return err
 	}
-	//上传成功：删除本地文件
-	_ = removeIfExists(resultZipPath)
 
-	//方便验证观察
+	// 方便验证观察
 	time.Sleep(5 * time.Second)
 
 	// 5) 上报 uploading
@@ -159,8 +174,12 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 			"msg":        "upload result failed: " + err.Error(),
 			"updated_at": now,
 		}).Err()
+		// 失败：保留本地 zip，方便你排查（不要删）
 		return err
 	}
+
+	// 上传成功：再删除本地文件（这才合理）
+	_ = removeIfExists(resultZipPath)
 
 	// 7) 成功：上报 success + 更新 redis
 	_ = w.reportStatus(taskID, statusPayload{

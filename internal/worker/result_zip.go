@@ -9,13 +9,14 @@ import (
 )
 
 func (w *Worker) buildFakeResultZip(taskID string) (string, error) {
-	resultsDir := filepath.Join(w.dataDir, "results")
-	if err := os.MkdirAll(resultsDir, 0755); err != nil {
+	//// worker 生成的是“临时文件”
+	tmpDir := filepath.Join(w.dataDir, "tmp")
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
 		return "", err
 	}
 
 	zipName := fmt.Sprintf("%s_result.zip", taskID)
-	zipPath := filepath.Join(resultsDir, zipName)
+	zipPath := filepath.Join(tmpDir, zipName)
 
 	zf, err := os.Create(zipPath)
 	if err != nil {
