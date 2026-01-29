@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"sync"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -42,11 +43,39 @@ func New(rdb *redis.Client, apiBaseURL, dataDir string, httpTimeout time.Duratio
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-	log.Printf("[worker] started. waiting for tasks... api=%s worker_id=%s", w.apiBaseURL, w.workerID)
+	concurrency := 4 // TODO: 从 config/env 读
 
+	log.Printf("[worker] started. waiting for tasks... api=%s worker_id=%s concurrency=%d",
+		w.apiBaseURL, w.workerID, concurrency)
+
+	jobs := make(chan QueueMsg, concurrency*2) // 有一点 buffer，形成背压但不至于太抖
+	var wg sync.WaitGroup
+
+	// consumers
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			log.Printf("[worker] consumer-%d started", idx)
+
+			for msg := range jobs {
+				log.Printf("[worker] consumer-%d handling task_id=%s", idx, msg.TaskID)
+				if err := w.handleOne(ctx, msg); err != nil {
+					log.Printf("[worker] consumer-%d task failed: task_id=%s err=%v", idx, msg.TaskID, err)
+				}
+			}
+
+			log.Printf("[worker] consumer-%d stopped", idx)
+		}(i)
+	}
+
+	// producer
 	for {
 		select {
 		case <-ctx.Done():
+			// 触发优雅退出：不再拉新任务，关闭 jobs，让 consumers 退出
+			close(jobs)
+			wg.Wait()
 			return ctx.Err()
 		default:
 		}
@@ -54,6 +83,8 @@ func (w *Worker) Run(ctx context.Context) error {
 		res, err := w.RDB.BLPop(ctx, 0, "queue:high", "queue:normal").Result()
 		if err != nil {
 			if ctx.Err() != nil {
+				close(jobs)
+				wg.Wait()
 				return ctx.Err()
 			}
 			log.Printf("[worker] BLPOP error: %v", err)
@@ -79,8 +110,13 @@ func (w *Worker) Run(ctx context.Context) error {
 
 		log.Printf("[worker] picked task_id=%s from %s zip=%s", msg.TaskID, queueName, msg.ZipName)
 
-		if err := w.handleOne(ctx, msg); err != nil {
-			log.Printf("[worker] task failed: task_id=%s err=%v", msg.TaskID, err)
+		// 背压点：jobs 满了会阻塞 producer → 自然控吞吐
+		select {
+		case jobs <- msg:
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return ctx.Err()
 		}
 	}
 }
@@ -110,8 +146,8 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 		Status:   "running",
 	})
 
-	// 方便验证观察（你要就保留）
-	time.Sleep(30 * time.Second)
+	// 方便验证观察
+	time.Sleep(5 * time.Second)
 
 	// 2) 同步更新 Redis 状态
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -126,7 +162,7 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 	// 3) 执行任务
 	time.Sleep(2 * time.Second)
 
-	// 4) 生成假的 result.zip
+	// 4) 生成假的result.zip
 	resultZipPath, err := w.buildFakeResultZip(taskID)
 	if err != nil {
 		_ = w.reportStatus(taskID, statusPayload{
@@ -174,11 +210,11 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 			"msg":        "upload result failed: " + err.Error(),
 			"updated_at": now,
 		}).Err()
-		// 失败：保留本地 zip，方便你排查（不要删）
+		// 失败：保留本地zip，方便排查
 		return err
 	}
 
-	// 上传成功：再删除本地文件（这才合理）
+	// 上传成功：再删除本地文件
 	_ = removeIfExists(resultZipPath)
 
 	// 7) 成功：上报 success + 更新 redis

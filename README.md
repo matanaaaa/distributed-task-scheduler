@@ -6,12 +6,25 @@ A distributed task scheduler in Go (Redis ZSet/Hash, worker pool, retry & DLQ).
 
 Client → API (Gin) → Redis
 
-- **List**: `queue:high`, `queue:normal` (priority queues)
-- **Hash**: `task:{id}` (task metadata & status)
+Redis:
 
-Worker → BLPOP queues → POST /tasks/:id/status (running → uploading → success/failed)
-Worker → generate a fake result.zip → POST /tasks/:id/result upload
-API persists result to data/results/ and serves download via GET /tasks/:id/result
+- **List queues**: `queue:high`, `queue:normal` (priority queues)
+- **Hash**: `task:{id}` (task metadata & status)
+- **Lock**: `lock:task:{id}` (SETNX+TTL + Lua release)
+
+Disk:
+
+- API stores uploaded task zip: `data/tasks/`
+- API stores result zip: `data/results/`
+- Worker generates temp result zip: `data/tmp/` (deleted after successful upload)
+
+Worker:
+
+- `BLPOP` from queues (high first)
+- bounded concurrency worker pool (jobs channel + N consumers)
+- `POST /tasks/:id/status` (running → uploading → success/failed)
+- `POST /tasks/:id/result` upload result zip
+- `GET /tasks/:id/result` download result zip
 
 ## Tech Stack
 
@@ -81,4 +94,5 @@ Get-Content .\unzipped\result.txt
 - v0.1: API supports task create/query/download; enqueue into Redis priority queues (queue:high/queue:normal)
 - v0.2: worker consumes queues and updates task status
 - v0.3: worker auto status + result upload/download
-  --v0.3.1: idempotency lock to prevent duplicate execution (SETNX+TTL + Lua release)
+- v0.3.1: idempotency lock to prevent duplicate execution (SETNX+TTL + Lua release)
+- v0.3.2: worker pool (bounded concurrency with jobs channel)
