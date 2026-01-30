@@ -1,16 +1,17 @@
 # distributed-task-scheduler
 
-A distributed task scheduler in Go (Redis ZSet/Hash, worker pool, retry & DLQ).
+A distributed task processing MVP in Go (Gin + Redis queues + worker pool + retry & DLQ).
 
 ## Architecture (MVP)
 
-Client → API (Gin) → Redis
+Client → API (Gin) → Redis + Disk
 
 Redis:
 
 - **List queues**: `queue:high`, `queue:normal` (priority queues)
 - **Hash**: `task:{id}` (task metadata & status)
 - **Lock**: `lock:task:{id}` (SETNX+TTL + Lua release)
+- **DLQ**: `queue:dlq` (moved here after max retries)
 
 Disk:
 
@@ -22,6 +23,7 @@ Worker:
 
 - `BLPOP` from queues (high first)
 - bounded concurrency worker pool (jobs channel + N consumers)
+- retries with exponential backoff on failure; after max retries, marks task as `dead` and pushes to `queue:dlq`
 - `POST /tasks/:id/status` (running → uploading → success/failed)
 - `POST /tasks/:id/result` upload result zip
 - `GET /tasks/:id/result` download result zip
@@ -29,7 +31,7 @@ Worker:
 ## Tech Stack
 
 - Go + Gin
-- Redis (ZSet/Hash)
+- Redis (List/Hash)
 - Docker Compose
 
 ## Quick Start
@@ -89,10 +91,36 @@ Expand-Archive -Path .\da9b350b-765d-491f-9477-59d195782454_result.zip -Destinat
 Get-Content .\unzipped\result.txt
 ```
 
+### (v0.4) Retry + DLQ (fault injection)
+
+Start worker with fault injection enabled:
+
+```bash
+$env:ENABLE_FAIL_TEST="1"
+go run .\cmd\worker\main.go
+```
+
+Create a failing task:
+
+```bash
+$resp = curl.exe -s -F "task_type=fail" -F "priority=high" -F "task_file=@.\demo_task.zip" http://localhost:8090/tasks
+$taskId = ($resp | ConvertFrom-Json).task_id
+$taskId
+```
+
+Verify DLQ and task status:
+
+```bash
+docker exec -it redis redis-cli LLEN queue:dlq
+docker exec -it redis redis-cli LRANGE queue:dlq 0 0
+curl.exe http://localhost:8090/tasks/$taskId
+```
+
 ## Changelog
 
 - v0.1: API supports task create/query/download; enqueue into Redis priority queues (queue:high/queue:normal)
 - v0.2: worker consumes queues and updates task status
 - v0.3: worker auto status + result upload/download
-- v0.3.1: idempotency lock to prevent duplicate execution (SETNX+TTL + Lua release)
-- v0.3.2: worker pool (bounded concurrency with jobs channel)
+  - v0.3.1: idempotency lock to prevent duplicate execution (SETNX+TTL + Lua release)
+  - v0.3.2: worker pool (bounded concurrency with jobs channel)
+- v0.4: retry with exponential backoff + DLQ (queue:dlq)

@@ -62,6 +62,7 @@ func (w *Worker) Run(ctx context.Context) error {
 				log.Printf("[worker] consumer-%d handling task_id=%s", idx, msg.TaskID)
 				if err := w.handleOne(ctx, msg); err != nil {
 					log.Printf("[worker] consumer-%d task failed: task_id=%s err=%v", idx, msg.TaskID, err)
+					w.onTaskFailed(ctx, msg, err)
 				}
 			}
 
@@ -138,6 +139,15 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 	// 用 Background，避免 ctx cancel 导致锁无法释放
 	defer w.releaseTaskLock(context.Background(), taskID)
 
+	// 故障注入：仅用于验证 retry/DLQ（默认关闭）
+	if os.Getenv("ENABLE_FAIL_TEST") == "1" {
+		t, _ := w.RDB.HGet(ctx, taskKey, "task_type").Result()
+		if t == "fail" {
+			return fmt.Errorf("forced fail for testing")
+		}
+	}
+
+
 	// 1) 上报 running（HTTP）
 	_ = w.reportStatus(taskID, statusPayload{
 		Phase:    "running",
@@ -147,7 +157,7 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 	})
 
 	// 方便验证观察
-	time.Sleep(5 * time.Second)
+	time.Sleep(1 * time.Second)
 
 	// 2) 同步更新 Redis 状态
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -160,7 +170,7 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 	}).Err()
 
 	// 3) 执行任务
-	time.Sleep(2 * time.Second)
+	time.Sleep(1 * time.Second)
 
 	// 4) 生成假的result.zip
 	resultZipPath, err := w.buildFakeResultZip(taskID)
@@ -183,7 +193,7 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 	}
 
 	// 方便验证观察
-	time.Sleep(5 * time.Second)
+	time.Sleep(1 * time.Second)
 
 	// 5) 上报 uploading
 	_ = w.reportStatus(taskID, statusPayload{
