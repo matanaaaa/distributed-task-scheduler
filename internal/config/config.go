@@ -1,11 +1,25 @@
 package config
 
-import "os"
+import (
+	"os"
+	"strconv"
+)
 
 type Config struct {
 	HTTPAddr  string
 	RedisAddr string
 	DataDir   string
+
+	// Worker
+	WorkerConcurrency        int
+	WorkerHTTPTimeoutSeconds int
+
+	// Idempotency lock
+	TaskLockTTLSeconds int
+
+	// Retry/DLQ
+	TaskMaxRetry        int
+	TaskRetryBaseSeconds int
 }
 
 func Load() Config {
@@ -13,6 +27,14 @@ func Load() Config {
 		HTTPAddr:  getEnv("HTTP_ADDR", ":8090"),
 		RedisAddr: getEnv("REDIS_ADDR", "localhost:6379"),
 		DataDir:   getEnv("DATA_DIR", "data"),
+
+		WorkerConcurrency:        getEnvInt("WORKER_CONCURRENCY", 4),
+		WorkerHTTPTimeoutSeconds: getEnvInt("WORKER_HTTP_TIMEOUT_SECONDS", 10),
+
+		TaskLockTTLSeconds: getEnvInt("TASK_LOCK_TTL_SECONDS", 300),
+
+		TaskMaxRetry:         getEnvInt("TASK_MAX_RETRY", 3),
+		TaskRetryBaseSeconds: getEnvInt("TASK_RETRY_BASE_SECONDS", 1),
 	}
 	return cfg
 }
@@ -23,4 +45,16 @@ func getEnv(k, def string) string {
 		return def
 	}
 	return v
+}
+
+func getEnvInt(k string, def int) int {
+	v := os.Getenv(k)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
 }

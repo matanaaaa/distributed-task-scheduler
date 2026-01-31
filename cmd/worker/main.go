@@ -24,7 +24,11 @@ func main() {
 
 	apiBase := "http://localhost:8090"
 
-	w := worker.New(rdb, apiBase, cfg.DataDir, 10*time.Second)
+	w := worker.New(rdb, apiBase, cfg.DataDir, time.Duration(cfg.WorkerHTTPTimeoutSeconds)*time.Second)
+	
+	w.SetConcurrency(cfg.WorkerConcurrency)
+	w.SetLockTTL(time.Duration(cfg.TaskLockTTLSeconds) * time.Second)
+	w.SetRetry(cfg.TaskMaxRetry, time.Duration(cfg.TaskRetryBaseSeconds)*time.Second)
 	
 	if err := w.Run(context.Background()); err != nil {
 		log.Fatal(err)

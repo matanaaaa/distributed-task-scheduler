@@ -27,6 +27,12 @@ type Worker struct {
 	httpTimeout time.Duration
 
 	workerID string
+
+	// configurable
+	concurrency int
+	lockTTL     time.Duration
+	maxRetry    int
+	retryBase   time.Duration
 }
 
 func New(rdb *redis.Client, apiBaseURL, dataDir string, httpTimeout time.Duration) *Worker {
@@ -39,11 +45,41 @@ func New(rdb *redis.Client, apiBaseURL, dataDir string, httpTimeout time.Duratio
 		dataDir:     dataDir,
 		httpTimeout: httpTimeout,
 		workerID:    wid,
+
+		concurrency: 4,
+		lockTTL:     300 * time.Second,
+		maxRetry:    3,
+		retryBase:   1 * time.Second,
 	}
 }
 
+func (w *Worker) SetConcurrency(n int) {
+	if n <= 0 {
+		n = 1
+	}
+	w.concurrency = n
+}
+
+func (w *Worker) SetLockTTL(d time.Duration) {
+	if d <= 0 {
+		d = 300 * time.Second
+	}
+	w.lockTTL = d
+}
+
+func (w *Worker) SetRetry(max int, base time.Duration) {
+	if max < 0 {
+		max = 0
+	}
+	if base <= 0 {
+		base = 1 * time.Second
+	}
+	w.maxRetry = max
+	w.retryBase = base
+}
+
 func (w *Worker) Run(ctx context.Context) error {
-	concurrency := 4 // TODO: 从 config/env 读
+	concurrency := w.concurrency
 
 	log.Printf("[worker] started. waiting for tasks... api=%s worker_id=%s concurrency=%d",
 		w.apiBaseURL, w.workerID, concurrency)
@@ -127,8 +163,7 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 	taskKey := "task:" + taskID
 
 	// === 幂等锁：防并发重复执行 ===
-	const lockTTL = 300 * time.Second
-	ok, err := w.acquireTaskLock(ctx, taskID, lockTTL)
+	ok, err := w.acquireTaskLock(ctx, taskID, w.lockTTL)
 	if err != nil {
 		return fmt.Errorf("acquire task lock failed: %w", err)
 	}

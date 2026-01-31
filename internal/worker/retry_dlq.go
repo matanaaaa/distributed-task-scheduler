@@ -10,7 +10,6 @@ import (
 )
 
 const (
-	defaultMaxRetry = 3
 	dlqQueue        = "queue:dlq"
 )
 
@@ -26,7 +25,7 @@ func (w *Worker) onTaskFailed(ctx context.Context, msg QueueMsg, cause error) {
 		return
 	}
 
-	maxRetry := int64(defaultMaxRetry)
+	maxRetry := int64(w.maxRetry)
 
 	// 记录失败原因
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -46,7 +45,7 @@ func (w *Worker) onTaskFailed(ctx context.Context, msg QueueMsg, cause error) {
 		}).Err()
 
 		// 3) backoff（指数退避，上限 10s）
-		d := retryBackoff(time.Second, int(retryCount), 10*time.Second)
+		d := retryBackoff(w.retryBase, int(retryCount), 10*time.Second)
 		log.Printf("[worker] retry scheduled: task_id=%s retry=%d/%d backoff=%s",
 			taskID, retryCount, maxRetry, d)
 

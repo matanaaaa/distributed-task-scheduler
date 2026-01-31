@@ -54,6 +54,36 @@ go run ./cmd/api/main.go
 go run ./cmd/worker/main.go
 ```
 
+## Configuration (env)
+
+Common:
+
+- `HTTP_ADDR` (default: `:8090`)
+- `REDIS_ADDR` (default: `localhost:6379`)
+- `DATA_DIR` (default: `data`)
+
+Worker:
+
+- `WORKER_CONCURRENCY` (default: `4`)
+- `WORKER_HTTP_TIMEOUT_SECONDS` (default: `10`)
+
+Idempotency lock:
+
+- `TASK_LOCK_TTL_SECONDS` (default: `300`)
+
+Retry/DLQ:
+
+- `TASK_MAX_RETRY` (default: `3`)
+- `TASK_RETRY_BASE_SECONDS` (default: `1`)
+
+Example (PowerShell):
+
+```powershell
+$env:WORKER_CONCURRENCY="8"
+$env:TASK_MAX_RETRY="5"
+go run .\cmd\worker\main.go
+```
+
 ## Demo (Windows PowerShell)
 
 ### Create a demo zip:
