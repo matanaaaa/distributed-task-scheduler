@@ -61,3 +61,7 @@ func (s *RedisStore) Enqueue(ctx context.Context, priority string, msg QueueMess
 func (s *RedisStore) TouchUpdatedAt(ctx context.Context, id string) error {
 	return s.rdb.HSet(ctx, taskKey(id), "updated_at", time.Now().UTC().Format(time.RFC3339)).Err()
 }
+
+func (s *RedisStore) Client() *redis.Client {
+	return s.rdb
+}

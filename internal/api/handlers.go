@@ -12,12 +12,16 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/matanaaaa/distributed-task-scheduler/internal/store"
 )
 
 type Service struct {
 	Store   *store.RedisStore
 	DataDir string
+
+	RDB *redis.Client
 }
 
 func (s *Service) tasksDir() string   { return filepath.Join(s.DataDir, "tasks") }

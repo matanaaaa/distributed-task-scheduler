@@ -20,6 +20,11 @@ type Config struct {
 	// Retry/DLQ
 	TaskMaxRetry        int
 	TaskRetryBaseSeconds int
+
+	// Rate limit (POST /tasks)
+	TasksRateLimit        int 
+	TasksRateWindowSeconds int 
+
 }
 
 func Load() Config {
@@ -35,6 +40,10 @@ func Load() Config {
 
 		TaskMaxRetry:         getEnvInt("TASK_MAX_RETRY", 3),
 		TaskRetryBaseSeconds: getEnvInt("TASK_RETRY_BASE_SECONDS", 1),
+
+		TasksRateLimit:         getEnvInt("TASKS_RATE_LIMIT", 20),
+		TasksRateWindowSeconds: getEnvInt("TASKS_RATE_WINDOW_SECONDS", 10),
+
 	}
 	return cfg
 }

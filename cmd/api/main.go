@@ -22,13 +22,14 @@ func main() {
 	svc := &api.Service{
 		Store:   st,
 		DataDir: cfg.DataDir,
+		RDB:     st.Client(),
 	}
 	log.Printf("[api] DataDir=%s", svc.DataDir)
 
 	h := &api.Handler{S: svc}
 
 	r := gin.Default()
-	api.RegisterRoutes(r, h)
+	api.RegisterRoutes(r, h, cfg)
 
 	log.Printf("api listening on %s", cfg.HTTPAddr)
 	if err := r.Run(cfg.HTTPAddr); err != nil {

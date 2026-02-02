@@ -1,6 +1,6 @@
 # distributed-task-scheduler
 
-A distributed task processing MVP in Go (Gin + Redis queues + worker pool + retry & DLQ).
+A distributed task processing MVP in Go (Gin + Redis queues + worker pool + retry & DLQ + rate limit).
 
 ## Architecture (MVP)
 
@@ -23,6 +23,7 @@ Worker:
 
 - `BLPOP` from queues (high first)
 - bounded concurrency worker pool (jobs channel + N consumers)
+- idempotency lock prevents duplicate execution
 - retries with exponential backoff on failure; after max retries, marks task as `dead` and pushes to `queue:dlq`
 - `POST /tasks/:id/status` (running → uploading → success/failed)
 - `POST /tasks/:id/result` upload result zip
@@ -75,6 +76,11 @@ Retry/DLQ:
 
 - `TASK_MAX_RETRY` (default: `3`)
 - `TASK_RETRY_BASE_SECONDS` (default: `1`)
+
+Rate limit (POST /tasks only):
+
+- `TASKS_RATE_LIMIT` (default: `3`)
+- `TASKS_RATE_WINDOW_SECONDS` (default: `10`)
 
 Example (PowerShell):
 
@@ -146,6 +152,18 @@ docker exec -it redis redis-cli LRANGE queue:dlq 0 0
 curl.exe http://localhost:8090/tasks/$taskId
 ```
 
+### (v0.5) Rate limit (POST /tasks)
+
+Example: allow 3 requests / 10 seconds, the 4th+ returns 429.
+
+```bash
+for ($i=1; $i -le 5; $i++) {
+Write-Host "== request $i =="
+curl.exe -s -w "`nHTTP %{http_code}`n" `    -F "task_type=demo" -F "priority=high" -F "task_file=@.\demo_task.zip"`
+http://localhost:8090/tasks
+}
+```
+
 ## Changelog
 
 - v0.1: API supports task create/query/download; enqueue into Redis priority queues (queue:high/queue:normal)
@@ -154,3 +172,4 @@ curl.exe http://localhost:8090/tasks/$taskId
   - v0.3.1: idempotency lock to prevent duplicate execution (SETNX+TTL + Lua release)
   - v0.3.2: worker pool (bounded concurrency with jobs channel)
 - v0.4: retry with exponential backoff + DLQ (queue:dlq)
+- v0.5: rate limit for POST /tasks (429 on exceed)
