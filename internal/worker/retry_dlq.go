@@ -17,6 +17,8 @@ func (w *Worker) onTaskFailed(ctx context.Context, msg QueueMsg, cause error) {
 	taskID := msg.TaskID
 	taskKey := "task:" + taskID
 
+	// failed_total +1
+	_ = w.RDB.HIncrBy(ctx, "metrics:tasks", "failed_total", 1).Err()
 	// 1) retry_count++
 	// HINCRBY 会在字段不存在时按 0 处理，非常适合最小实现
 	retryCount, err := w.RDB.HIncrBy(ctx, taskKey, "retry_count", 1).Result()
@@ -64,6 +66,10 @@ func (w *Worker) onTaskFailed(ctx context.Context, msg QueueMsg, cause error) {
 		log.Printf("[worker] push to dlq failed: task_id=%s err=%v", taskID, err)
 		return
 	}
+
+	// dead_total +1（最终失败次数）
+	_ = w.RDB.HIncrBy(ctx, "metrics:tasks", "dead_total", 1).Err()
+
 
 	_ = w.RDB.HSet(ctx, taskKey, map[string]any{
 		"status":      "dead",

@@ -174,6 +174,12 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 	// 用 Background，避免 ctx cancel 导致锁无法释放
 	defer w.releaseTaskLock(context.Background(), taskID)
 
+	// metrics（拿到锁才算真正开始处理）
+	_ = w.RDB.HIncrBy(ctx, "metrics:tasks", "processing", 1).Err()
+	defer func() {
+		_ = w.RDB.HIncrBy(context.Background(), "metrics:tasks", "processing", -1).Err()
+	}()
+
 	// 故障注入：仅用于验证 retry/DLQ（默认关闭）
 	if os.Getenv("ENABLE_FAIL_TEST") == "1" {
 		t, _ := w.RDB.HGet(ctx, taskKey, "task_type").Result()
@@ -277,6 +283,9 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 		"msg":        "done",
 		"updated_at": now,
 	}).Err()
+
+	// success_total
+	_ = w.RDB.HIncrBy(ctx, "metrics:tasks", "success_total", 1).Err()
 
 	log.Printf("[worker] done task_id=%s result=%s", taskID, filepath.Base(resultZipPath))
 	return nil

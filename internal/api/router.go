@@ -27,4 +27,8 @@ func RegisterRoutes(r *gin.Engine, h *Handler, cfg config.Config) {
 	r.POST("/tasks/:id/status", h.ReportTaskStatus)
     r.POST("/tasks/:id/result", h.UploadTaskResult)
     r.GET("/tasks/:id/result", h.DownloadTaskResult)
+
+	r.GET("/healthz", h.Healthz)
+	r.GET("/metrics", h.Metrics)
+
 }
