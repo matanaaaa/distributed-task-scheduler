@@ -227,7 +227,7 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 	// 3) 执行任务
 	time.Sleep(1 * time.Second)
 
-	attempt := 1 // 最小版先写 1；后面你要把 retryCount 传进来再改
+	attempt := 1 // 最小版先写 1；
 	resultZipPath, err := w.buildResultZipFromTaskPackage(ctx, msg, attempt)
 
 	if err != nil {

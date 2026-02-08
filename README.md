@@ -69,6 +69,8 @@ Worker:
 
 - `WORKER_CONCURRENCY` (default: `4`)
 - `WORKER_HTTP_TIMEOUT_SECONDS` (default: `10`)
+- `TASK_EXEC_IMAGE` (default: ubuntu:22.04)
+- `TASK_EXEC_TIMEOUT_SECONDS` (default: 30)
 
 Idempotency lock:
 
@@ -91,6 +93,74 @@ $env:WORKER_CONCURRENCY="8"
 $env:TASK_MAX_RETRY="5"
 go run .\cmd\worker\main.go
 ```
+
+## Task Contract & Execution (Docker sandbox)
+
+This project treats each task as a zip bundle that the worker executes inside a Docker sandbox. The contract ensures tasks are reproducible and isolated.
+
+### Task zip format
+
+When creating a task, you upload a task.zip. The zip MUST include:
+
+- run.sh (required): entrypoint script executed by the worker
+
+Your run.sh MUST write all artifacts to:
+
+- output/ (directory, created by run.sh if not exists)
+
+Recommended structure inside task.zip:
+
+```text
+task.zip
+├─ run.sh
+└─ (your files...)
+```
+
+Example run.sh behavior:
+
+- read inputs from current working directory (/work)
+- create output/
+- write artifacts into output/
+
+### How the worker runs a task
+
+The worker unzips task.zip into a per-task work directory (mounted into the container as /work) and runs:
+
+```bash
+docker run --rm -v <workdir>:/work -w /work $TASK_EXEC_IMAGE bash run.sh
+```
+
+- <workdir> is a host directory containing the extracted task files
+
+- container working directory is /work
+
+- entrypoint is bash run.sh
+
+### Result bundle (worker → API)
+
+After execution, the worker uploads a result.zip containing:
+
+```text
+result.zip
+├─ output/         # task artifacts produced by run.sh
+├─ stdout.log      # captured stdout from container execution
+├─ stderr.log      # captured stderr from container execution
+└─ metadata.json   # execution metadata (image, exit code, duration, etc.)
+```
+
+Sandbox env configuration
+
+Worker execution environment variables:
+
+- TASK_EXEC_IMAGE (default: ubuntu:22.04)
+
+- TASK_EXEC_TIMEOUT_SECONDS (default: 30)
+
+Notes:
+
+- If execution exceeds TASK_EXEC_TIMEOUT_SECONDS, the worker should terminate the run and mark the attempt as failed (and will follow retry/DLQ policy if enabled).
+
+- TASK_EXEC_IMAGE should contain the runtime dependencies your run.sh needs.
 
 ## Demo (Windows PowerShell)
 
@@ -213,3 +283,4 @@ Notes:
 - v0.4: retry with exponential backoff + DLQ (queue:dlq)
 - v0.5: rate limit for POST /tasks (429 on exceed)
 - v0.6: observability endpoints `/healthz` and `/metrics`
+- v0.7: task contract + docker sandbox execution (run.sh + output/ + result)
