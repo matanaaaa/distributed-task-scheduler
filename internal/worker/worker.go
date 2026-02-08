@@ -33,6 +33,9 @@ type Worker struct {
 	lockTTL     time.Duration
 	maxRetry    int
 	retryBase   time.Duration
+
+	execImage   string
+	execTimeout time.Duration
 }
 
 func New(rdb *redis.Client, apiBaseURL, dataDir string, httpTimeout time.Duration) *Worker {
@@ -50,6 +53,8 @@ func New(rdb *redis.Client, apiBaseURL, dataDir string, httpTimeout time.Duratio
 		lockTTL:     300 * time.Second,
 		maxRetry:    3,
 		retryBase:   1 * time.Second,
+		execImage:   "ubuntu:22.04",
+		execTimeout: 30 * time.Second,
 	}
 }
 
@@ -76,6 +81,15 @@ func (w *Worker) SetRetry(max int, base time.Duration) {
 	}
 	w.maxRetry = max
 	w.retryBase = base
+}
+
+func (w *Worker) SetExec(image string, timeout time.Duration) {
+	if image != "" {
+		w.execImage = image
+	}
+	if timeout > 0 {
+		w.execTimeout = timeout
+	}
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -213,13 +227,14 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 	// 3) 执行任务
 	time.Sleep(1 * time.Second)
 
-	// 4) 生成假的result.zip
-	resultZipPath, err := w.buildFakeResultZip(taskID)
+	attempt := 1 // 最小版先写 1；后面你要把 retryCount 传进来再改
+	resultZipPath, err := w.buildResultZipFromTaskPackage(ctx, msg, attempt)
+
 	if err != nil {
 		_ = w.reportStatus(taskID, statusPayload{
 			Phase:    "completed_failed",
 			Progress: 100,
-			Msg:      "build result zip failed: " + err.Error(),
+			Msg:      err.Error(),
 			Status:   "failed",
 		})
 		now = time.Now().UTC().Format(time.RFC3339)
@@ -227,7 +242,7 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 			"status":     "failed",
 			"phase":      "completed_failed",
 			"progress":   "100",
-			"msg":        "build result zip failed: " + err.Error(),
+			"msg":        err.Error(),
 			"updated_at": now,
 		}).Err()
 		return err
@@ -247,6 +262,7 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 	// 6) 上传 result.zip
 	log.Printf("[worker] about to upload: task_id=%s path=%s", taskID, resultZipPath)
 	if err := w.uploadResult(taskID, resultZipPath); err != nil {
+		err = fmt.Errorf("upload result failed: %w", err)
 		_ = w.reportStatus(taskID, statusPayload{
 			Phase:    "completed_failed",
 			Progress: 100,

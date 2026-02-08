@@ -25,6 +25,9 @@ type Config struct {
 	TasksRateLimit        int 
 	TasksRateWindowSeconds int 
 
+	// Task execution (real pipeline)
+	TaskExecImage          string
+	TaskExecTimeoutSeconds int
 }
 
 func Load() Config {
@@ -43,6 +46,9 @@ func Load() Config {
 
 		TasksRateLimit:         getEnvInt("TASKS_RATE_LIMIT", 20),
 		TasksRateWindowSeconds: getEnvInt("TASKS_RATE_WINDOW_SECONDS", 10),
+
+		TaskExecImage:          getEnv("TASK_EXEC_IMAGE", "ubuntu:22.04"),
+		TaskExecTimeoutSeconds: getEnvInt("TASK_EXEC_TIMEOUT_SECONDS", 30),
 
 	}
 	return cfg

@@ -13,6 +13,9 @@ result.txt
 result.zip
 demo.txt
 demo_task.zip
+result_unzipped/
+task_bad/
+task_demo
 
 # logs
 *.log

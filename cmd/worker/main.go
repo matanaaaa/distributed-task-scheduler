@@ -29,6 +29,12 @@ func main() {
 	w.SetConcurrency(cfg.WorkerConcurrency)
 	w.SetLockTTL(time.Duration(cfg.TaskLockTTLSeconds) * time.Second)
 	w.SetRetry(cfg.TaskMaxRetry, time.Duration(cfg.TaskRetryBaseSeconds)*time.Second)
+	w.SetExec(cfg.TaskExecImage, time.Duration(cfg.TaskExecTimeoutSeconds)*time.Second)
+
+	// warmup
+	if err := worker.WarmUpDockerImage(context.Background(), cfg.TaskExecImage); err != nil {
+		log.Printf("[worker] docker warmup skipped: %v", err)
+	}
 	
 	if err := w.Run(context.Background()); err != nil {
 		log.Fatal(err)
