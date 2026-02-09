@@ -127,7 +127,13 @@ Example run.sh behavior:
 The worker unzips task.zip into a per-task work directory (mounted into the container as /work) and runs:
 
 ```bash
-docker run --rm -v <workdir>:/work -w /work $TASK_EXEC_IMAGE bash run.sh
+docker run --rm \
+  --name task_<task_id>_attempt_<attempt> \
+  --network none \
+  --cpus 1 --memory 512m \
+  -v <workdir>:/work -w /work \
+  $TASK_EXEC_IMAGE bash run.sh
+
 ```
 
 - <workdir> is a host directory containing the extracted task files
@@ -148,6 +154,12 @@ result.zip
 └─ metadata.json   # execution metadata (image, exit code, duration, etc.)
 ```
 
+Notes:
+
+- The worker uploads result.zip even on failure (timeout / non-zero exit / contract violation / unzip/download error),
+  so users can always download /tasks/:id/result to debug without checking Redis.
+- metadata.json includes attempt, exit_code, timeout, duration_ms and error (if any).
+
 Sandbox env configuration
 
 Worker execution environment variables:
@@ -167,8 +179,26 @@ Notes:
 ### Create a demo zip:
 
 ```powershell
-"hello task" | Out-File -Encoding utf8 demo.txt
-Compress-Archive -Path .\demo.txt -DestinationPath .\demo_task.zip -Force
+# Create a minimal task zip that follows the contract (contains run.sh and writes to output/)
+Remove-Item -Recurse -Force .\demo_task_dir -ErrorAction SilentlyContinue
+Remove-Item -Force .\demo_task.zip -ErrorAction SilentlyContinue
+
+New-Item -ItemType Directory -Force .\demo_task_dir | Out-Null
+
+$sh = @"
+#!/bin/sh
+set -e
+mkdir -p output
+echo "hello from task" > output/result.txt
+echo "stdout line"
+echo "stderr line" 1>&2
+"@ -replace "`r`n", "`n"
+
+$runShPath = Join-Path (Get-Location) "demo_task_dir\run.sh"
+[System.IO.File]::WriteAllText($runShPath, $sh, (New-Object System.Text.UTF8Encoding($false)))
+
+Compress-Archive -Force -Path .\demo_task_dir\* -DestinationPath .\demo_task.zip
+
 ```
 
 ### Create task (upload zip and enqueue):
@@ -194,9 +224,18 @@ curl.exe -OJ http://localhost:8090/tasks/<task_id>/download
 #### Download original result zip
 
 ```powershell
-curl.exe -L -o .\<task_id>\_result.zip http://localhost:8090/tasks/<task_id>/result
-Expand-Archive -Path .\da9b350b-765d-491f-9477-59d195782454_result.zip -DestinationPath .\unzipped -Force
-Get-Content .\unzipped\result.txt
+# Download and inspect result.zip
+$resp = curl.exe -s -F "task_type=demo" -F "priority=high" -F "task_file=@.\demo_task.zip" http://localhost:8090/tasks
+$taskId = ($resp | ConvertFrom-Json).task_id
+$taskId
+
+curl.exe http://localhost:8090/tasks/$taskId
+
+curl.exe -L -o .\result.zip http://localhost:8090/tasks/$taskId/result
+Expand-Archive -Path .\result.zip -DestinationPath .\unzipped -Force
+Get-Content .\unzipped\metadata.json
+Get-Content .\unzipped\output\result.txt
+
 ```
 
 ### (v0.4) Retry + DLQ (fault injection)
@@ -284,3 +323,4 @@ Notes:
 - v0.5: rate limit for POST /tasks (429 on exceed)
 - v0.6: observability endpoints `/healthz` and `/metrics`
 - v0.7: task contract + docker sandbox execution (run.sh + output/ + result)
+  - v0.7.1: always upload result.zip even on failed attempts (timeout/exit!=0/contract/unzip/download), attempt tracking + docker sandbox hardening (name/network/resource limits)

@@ -227,7 +227,12 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 	// 3) 执行任务
 	time.Sleep(1 * time.Second)
 
-	attempt := 1 // 最小版先写 1；
+	attemptKey := "attempt"
+	attemptN, aerr := w.RDB.HIncrBy(ctx, taskKey, attemptKey, 1).Result()
+	if aerr != nil {
+		attemptN = 1
+	}
+	attempt := int(attemptN)
 	resultZipPath, err := w.buildResultZipFromTaskPackage(ctx, msg, attempt)
 
 	if err != nil {
@@ -245,6 +250,48 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 			"msg":        err.Error(),
 			"updated_at": now,
 		}).Err()
+		
+		// 上传失败 zip
+		if resultZipPath != "" {
+			_ = w.reportStatus(taskID, statusPayload{
+				Phase:    "uploading_result",
+				Progress: 90,
+				Msg:      "uploading result.zip (failed run)",
+				Status:   "failed",
+			})
+			_ = w.RDB.HSet(ctx, taskKey, map[string]any{
+			"msg": "failed, but result.zip uploaded",
+			"updated_at": time.Now().UTC().Format(time.RFC3339),
+			}).Err()
+
+			log.Printf("[worker] about to upload (failed): task_id=%s path=%s", taskID, resultZipPath)
+			if upErr := w.uploadResult(taskID, resultZipPath); upErr != nil {
+				upErr = fmt.Errorf("upload result failed: %w", upErr)
+
+				_ = w.reportStatus(taskID, statusPayload{
+					Phase:    "completed_failed",
+					Progress: 100,
+					Msg:      upErr.Error(),
+					Status:   "failed",
+				})
+				now = time.Now().UTC().Format(time.RFC3339)
+				_ = w.RDB.HSet(ctx, taskKey, map[string]any{
+					"status":     "failed",
+					"phase":      "completed_failed",
+					"progress":   "100",
+					"msg":        upErr.Error(),
+					"updated_at": now,
+				}).Err()
+
+				// 上传失败：保留本地 zip
+				return upErr
+			}
+
+			// 上传成功：删本地 zip
+			_ = removeIfExists(resultZipPath)
+		}
+
+		// build 的原始错误往上抛（用于 retry/DLQ 逻辑）
 		return err
 	}
 

@@ -33,21 +33,54 @@ func (w *Worker) buildResultZipFromTaskPackage(ctx context.Context, msg QueueMsg
 		return "", err
 	}
 
+	// result zip path 先确定（失败也要落这个）
+	resultZipPath := filepath.Join(w.dataDir, "tmp", fmt.Sprintf("%s_result.zip", taskID))
+	if err := os.MkdirAll(filepath.Dir(resultZipPath), 0755); err != nil {
+		return "", err
+	}
+
+	// 统一失败收尾：写 metadata + touch logs + zipResult
+	finalizeFailure := func(cause error) (string, error) {
+		_ = os.MkdirAll(filepath.Join(workDir, "output"), 0755)
+		_ = ensureFile(filepath.Join(workDir, "stdout.log"))
+		_ = ensureFile(filepath.Join(workDir, "stderr.log"))
+
+		meta := execMeta{
+			TaskID:     taskID,
+			Attempt:    attempt,
+			ExitCode:   -1,
+			Timeout:    false,
+			DurationMs: 0,
+			ExecImage:  w.execImage,
+			Error:      cause.Error(),
+		}
+		_ = writeJSON(filepath.Join(workDir, "metadata.json"), meta)
+
+		// 即使 zip 失败，也要把原 cause 往上抛；zipErr 只做补充信息
+		if zipErr := zipResult(resultZipPath, workDir, []string{
+			"output",
+			"stdout.log",
+			"stderr.log",
+			"metadata.json",
+		}); zipErr != nil {
+			return "", fmt.Errorf("%w (and zipResult failed: %v)", cause, zipErr)
+		}
+		return resultZipPath, cause
+	}
+
 	// 2) download task zip -> workdir/task.zip
 	taskZipPath := filepath.Join(workDir, "task.zip")
 	if err := w.downloadTaskZip(ctx, taskID, taskZipPath); err != nil {
-		return "", fmt.Errorf("download task zip: %w", err)
+		return finalizeFailure(fmt.Errorf("download task zip: %w", err))
 	}
 
-	// 3) unzip into workdir
 	if err := unzipToDir(taskZipPath, workDir); err != nil {
-		return "", fmt.Errorf("unzip task zip: %w", err)
+		return finalizeFailure(fmt.Errorf("unzip task zip: %w", err))
 	}
 
-	// 4) must have run.sh
 	runSh := filepath.Join(workDir, "run.sh")
 	if _, err := os.Stat(runSh); err != nil {
-		return "", fmt.Errorf("task contract violated: missing run.sh")
+		return finalizeFailure(fmt.Errorf("task contract violated: missing run.sh"))
 	}
 
 	// 5) ensure output dir exists
@@ -59,7 +92,7 @@ func (w *Worker) buildResultZipFromTaskPackage(ctx context.Context, msg QueueMsg
 	stderrPath := filepath.Join(workDir, "stderr.log")
 
 	start := time.Now()
-	exitCode, timeout, runErr := w.runDocker(execCtxOrBackground(ctx), workDir, stdoutPath, stderrPath)
+	exitCode, timeout, runErr := w.runDocker(ctx, taskID, attempt, workDir, stdoutPath, stderrPath)
 	dur := time.Since(start)
 
 	meta := execMeta{
@@ -78,10 +111,7 @@ func (w *Worker) buildResultZipFromTaskPackage(ctx context.Context, msg QueueMsg
 	_ = writeJSON(metaPath, meta)
 
 	// 7) pack result.zip (output/ + logs + metadata)
-	resultZipPath := filepath.Join(w.dataDir, "tmp", fmt.Sprintf("%s_result.zip", taskID))
-	if err := os.MkdirAll(filepath.Dir(resultZipPath), 0755); err != nil {
-		return "", err
-	}
+	
 	if err := zipResult(resultZipPath, workDir, []string{
 		"output",
 		"stdout.log",
@@ -99,6 +129,18 @@ func (w *Worker) buildResultZipFromTaskPackage(ctx context.Context, msg QueueMsg
 }
 
 // -------- helpers --------
+
+func ensureFile(path string) error {
+	// touch empty file if not exists
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
 
 func (w *Worker) downloadTaskZip(ctx context.Context, taskID, dstPath string) error {
 	url := fmt.Sprintf("%s/tasks/%s/download", w.apiBaseURL, taskID)
