@@ -30,6 +30,7 @@ func main() {
 	w.SetLockTTL(time.Duration(cfg.TaskLockTTLSeconds) * time.Second)
 	w.SetRetry(cfg.TaskMaxRetry, time.Duration(cfg.TaskRetryBaseSeconds)*time.Second)
 	w.SetExec(cfg.TaskExecImage, time.Duration(cfg.TaskExecTimeoutSeconds)*time.Second)
+	w.SetUnzipLimits(cfg.TaskUnzipMaxBytes, cfg.TaskUnzipEntryMaxBytes)
 
 	// warmup
 	if err := worker.WarmUpDockerImage(context.Background(), cfg.TaskExecImage); err != nil {

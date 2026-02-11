@@ -86,7 +86,18 @@ Rate limit (POST /tasks only):
 - `TASKS_RATE_LIMIT` (default: `3`)
 - `TASKS_RATE_WINDOW_SECONDS` (default: `10`)
 
-Example (PowerShell):
+Zip security boundaries:
+
+- `TASK_ZIP_MAX_BYTES` (default: `20971520` = 20MB)  
+  API upload size limit for `POST /tasks` (rejects oversized uploads early)
+
+- `TASK_UNZIP_MAX_BYTES` (default: `134217728` = 128MB)  
+  Worker total uncompressed limit when extracting task.zip (prevents zip bombs)
+
+- `TASK_UNZIP_ENTRY_MAX_BYTES` (default: `33554432` = 32MB)  
+  Worker per-entry uncompressed limit when extracting task.zip (prevents single huge file)
+
+Example (Config through PowerShell):
 
 ```powershell
 $env:WORKER_CONCURRENCY="8"
@@ -173,6 +184,19 @@ Notes:
 - If execution exceeds TASK_EXEC_TIMEOUT_SECONDS, the worker should terminate the run and mark the attempt as failed (and will follow retry/DLQ policy if enabled).
 
 - TASK_EXEC_IMAGE should contain the runtime dependencies your run.sh needs.
+
+### Zip safety boundaries (defense-in-depth)
+
+To protect the API/worker from malicious task archives (zip slip / zip bomb), the system enforces:
+
+- API ingress: request body + zip size limited to **20MB** (`TASK_ZIP_MAX_BYTES`)
+- Worker unzip:
+  - **Zip-slip detection**: reject entries that escape dstDir (e.g. `../evil.txt`, absolute paths)
+  - **Total uncompressed limit**: **128MB** (`TASK_UNZIP_MAX_BYTES`)
+  - **Per-entry uncompressed limit**: **32MB** (`TASK_UNZIP_ENTRY_MAX_BYTES`)
+
+If unzip is rejected, the worker still uploads `result.zip`,
+and `metadata.json.error` contains the exact reason.
 
 ## Demo (Windows PowerShell)
 
@@ -312,6 +336,44 @@ Notes:
 - `dts_tasks_total{status="failed"}` counts each failed attempt (including retries)
 - `dts_tasks_total{status="dead"}` counts tasks moved to DLQ
 
+### (v0.7) Security tests
+
+> Full scripts: `scripts/security/` (PowerShell)
+
+#### A) Zip Slip (../evil.txt) should be rejected
+
+```powershell
+pwsh .\scripts\security\make_zipslip.ps1
+$resp = curl.exe -s -F "task_type=demo" -F "priority=high" -F "task_file=@.\task_zipslip.zip" http://localhost:8090/tasks
+$taskId = ($resp | ConvertFrom-Json).task_id
+curl.exe -L -o .\result_zipslip.zip http://localhost:8090/tasks/$taskId/result
+Expand-Archive -Force -Path .\result_zipslip.zip -DestinationPath .\result_zipslip_unzipped
+Get-Content .\result_zipslip_unzipped\metadata.json
+Test-Path .\evil.txt   # should be False
+```
+
+#### B) Zip Bomb (total unzip > 128MB) should be rejected
+
+```powershell
+pwsh .\scripts\security\make_zipbomb.ps1
+$resp = curl.exe -s -F "task_type=demo" -F "priority=high" -F "task_file=@.\task_zipbomb.zip" http://localhost:8090/tasks
+$taskId = ($resp | ConvertFrom-Json).task_id
+curl.exe -L -o .\result_zipbomb.zip http://localhost:8090/tasks/$taskId/result
+Expand-Archive -Force -Path .\result_zipbomb.zip -DestinationPath .\result_zipbomb_unzipped
+Get-Content .\result_zipbomb_unzipped\metadata.json
+```
+
+#### C) Single entry > 32MB should be rejected
+
+```powershell
+pwsh .\scripts\security\make_entry40m.ps1
+$resp = curl.exe -s -F "task_type=demo" -F "priority=high" -F "task_file=@.\task_entry40m.zip" http://localhost:8090/tasks
+$taskId = ($resp | ConvertFrom-Json).task_id
+curl.exe -L -o .\result_entry40m.zip http://localhost:8090/tasks/$taskId/result
+Expand-Archive -Force -Path .\result_entry40m.zip -DestinationPath .\result_entry40m_unzipped
+Get-Content .\result_entry40m_unzipped\metadata.json
+```
+
 ## Changelog
 
 - v0.1: API supports task create/query/download; enqueue into Redis priority queues (queue:high/queue:normal)
@@ -324,3 +386,4 @@ Notes:
 - v0.6: observability endpoints `/healthz` and `/metrics`
 - v0.7: task contract + docker sandbox execution (run.sh + output/ + result)
   - v0.7.1: always upload result.zip even on failed attempts (timeout/exit!=0/contract/unzip/download), attempt tracking + docker sandbox hardening (name/network/resource limits)
+  - v0.7.2: zip security boundaries (API upload limit + worker unzip zip-slip + size limits)

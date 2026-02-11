@@ -36,6 +36,10 @@ type Worker struct {
 
 	execImage   string
 	execTimeout time.Duration
+
+	// unzip security boundaries
+	unzipMaxBytes      int64 // total uncompressed limit
+	unzipEntryMaxBytes int64 // per entry uncompressed limit
 }
 
 func New(rdb *redis.Client, apiBaseURL, dataDir string, httpTimeout time.Duration) *Worker {
@@ -55,6 +59,8 @@ func New(rdb *redis.Client, apiBaseURL, dataDir string, httpTimeout time.Duratio
 		retryBase:   1 * time.Second,
 		execImage:   "ubuntu:22.04",
 		execTimeout: 30 * time.Second,
+		unzipMaxBytes:      128 << 20,
+		unzipEntryMaxBytes: 32 << 20,
 	}
 }
 
@@ -91,6 +97,22 @@ func (w *Worker) SetExec(image string, timeout time.Duration) {
 		w.execTimeout = timeout
 	}
 }
+
+func (w *Worker) SetUnzipLimits(maxTotal, maxEntry int64) {
+	if maxTotal <= 0 {
+		maxTotal = 128 << 20
+	}
+	if maxEntry <= 0 {
+		maxEntry = 32 << 20
+	}
+
+	if maxEntry > maxTotal {
+		maxEntry = maxTotal
+	}
+	w.unzipMaxBytes = maxTotal
+	w.unzipEntryMaxBytes = maxEntry
+}
+
 
 func (w *Worker) Run(ctx context.Context) error {
 	concurrency := w.concurrency

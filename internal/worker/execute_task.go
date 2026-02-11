@@ -74,9 +74,10 @@ func (w *Worker) buildResultZipFromTaskPackage(ctx context.Context, msg QueueMsg
 		return finalizeFailure(fmt.Errorf("download task zip: %w", err))
 	}
 
-	if err := unzipToDir(taskZipPath, workDir); err != nil {
+	if err := unzipToDir(taskZipPath, workDir, w.unzipMaxBytes, w.unzipEntryMaxBytes); err != nil {
 		return finalizeFailure(fmt.Errorf("unzip task zip: %w", err))
 	}
+
 
 	runSh := filepath.Join(workDir, "run.sh")
 	if _, err := os.Stat(runSh); err != nil {
@@ -168,29 +169,60 @@ func (w *Worker) downloadTaskZip(ctx context.Context, taskID, dstPath string) er
 	return err
 }
 
-func unzipToDir(zipPath, dstDir string) error {
+func unzipToDir(zipPath, dstDir string , maxTotalBytes, maxEntryBytes int64) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
 
+	absDst, err := filepath.Abs(dstDir)
+	if err != nil {
+		return fmt.Errorf("abs dst dir: %w", err)
+	}
+	dstPrefix := absDst + string(os.PathSeparator)
+
+	var totalWritten int64
+
 	for _, f := range r.File {
-		// 防止zip-slip
-		cleanName := filepath.Clean(f.Name)
-		if strings.Contains(cleanName, "..") {
-			return fmt.Errorf("invalid zip entry: %s", f.Name)
+		name := f.Name
+		if name == "" {
+			return fmt.Errorf("zip-slip detected: empty entry name")
 		}
-		full := filepath.Join(dstDir, cleanName)
+		// Reject absolute paths
+		if strings.HasPrefix(name, "/") || strings.HasPrefix(name, "\\") {
+			return fmt.Errorf("zip-slip detected: absolute path entry: %q", name)
+		}
+		// Reject Windows drive letter paths (C:\...)
+		if len(name) >= 2 && name[1] == ':' {
+			return fmt.Errorf("zip-slip detected: drive letter entry: %q", name)
+		}
+
+		cleanName := filepath.Clean(name)
+		fullPath := filepath.Join(absDst, cleanName)
+
+		absFull, err := filepath.Abs(fullPath)
+		if err != nil {
+			return fmt.Errorf("abs full path: %w", err)
+		}
+		// Must stay within dstDir
+		if absFull != absDst && !strings.HasPrefix(absFull, dstPrefix) {
+			return fmt.Errorf("zip-slip detected: entry %q escapes dst", name)
+		}
 
 		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(full, 0755); err != nil {
+			if err := os.MkdirAll(absFull, 0755); err != nil {
 				return err
 			}
 			continue
 		}
 
-		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+		// Declared size guard (if available)
+		if f.UncompressedSize64 > uint64(maxEntryBytes) {
+			return fmt.Errorf("zip entry too large: %q (%d bytes > %d)", name, f.UncompressedSize64, maxEntryBytes)
+		}
+
+		if err := os.MkdirAll(filepath.Dir(absFull), 0755); err != nil {
 			return err
 		}
 
@@ -198,21 +230,35 @@ func unzipToDir(zipPath, dstDir string) error {
 		if err != nil {
 			return err
 		}
-		out, err := os.Create(full)
+		out, err := os.OpenFile(absFull, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 		if err != nil {
-			in.Close()
+			_ = in.Close()
 			return err
 		}
-		if _, err := io.Copy(out, in); err != nil {
-			out.Close()
-			in.Close()
-			return err
+
+		// Hard limit while extracting (protect against zip bombs)
+		limited := io.LimitReader(in, maxEntryBytes+1)
+		written, copyErr := io.Copy(out, limited)
+
+		_ = out.Close()
+		_ = in.Close()
+
+		if copyErr != nil {
+			return copyErr
 		}
-		out.Close()
-		in.Close()
+		if written > maxEntryBytes {
+			return fmt.Errorf("zip entry too large while extracting: %q (> %d bytes)", name, maxEntryBytes)
+		}
+
+		totalWritten += written
+		if totalWritten > maxTotalBytes {
+			return fmt.Errorf("zip too large after unzip: total=%d limit=%d", totalWritten, maxTotalBytes)
+		}
 	}
+
 	return nil
 }
+
 
 func writeJSON(path string, v any) error {
 	b, _ := json.MarshalIndent(v, "", "  ")

@@ -28,6 +28,12 @@ type Config struct {
 	// Task execution (real pipeline)
 	TaskExecImage          string
 	TaskExecTimeoutSeconds int
+
+	// Zip security boundaries
+	TaskZipMaxBytes        int64 // upload size limit (API)
+	TaskUnzipMaxBytes      int64 // total uncompressed limit (worker)
+	TaskUnzipEntryMaxBytes int64 // per-entry uncompressed limit (worker)
+
 }
 
 func Load() Config {
@@ -49,6 +55,10 @@ func Load() Config {
 
 		TaskExecImage:          getEnv("TASK_EXEC_IMAGE", "ubuntu:22.04"),
 		TaskExecTimeoutSeconds: getEnvInt("TASK_EXEC_TIMEOUT_SECONDS", 30),
+
+		TaskZipMaxBytes:        getEnvInt64("TASK_ZIP_MAX_BYTES", 20<<20),
+		TaskUnzipMaxBytes:      getEnvInt64("TASK_UNZIP_MAX_BYTES", 128<<20),
+		TaskUnzipEntryMaxBytes: getEnvInt64("TASK_UNZIP_ENTRY_MAX_BYTES", 32<<20),
 
 	}
 	return cfg
@@ -73,3 +83,16 @@ func getEnvInt(k string, def int) int {
 	}
 	return n
 }
+
+func getEnvInt64(k string, def int64) int64 {
+	v := os.Getenv(k)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+

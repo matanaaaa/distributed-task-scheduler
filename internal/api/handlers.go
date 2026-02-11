@@ -44,6 +44,9 @@ func (h *Handler) Ping(c *gin.Context) {
 func (h *Handler) CreateTask(c *gin.Context) {
 	ctx := context.Background()
 
+	// Hard cap request body to 20MB (must be before PostForm/FormFile)
+    c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 20<<20)
+	
 	taskType := strings.TrimSpace(c.PostForm("task_type"))
 	priority := strings.ToLower(strings.TrimSpace(c.PostForm("priority")))
 	useDockerStr := strings.ToLower(strings.TrimSpace(c.PostForm("use_docker")))
