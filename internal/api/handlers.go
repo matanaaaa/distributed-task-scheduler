@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 	"log"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -236,62 +237,103 @@ func (h *Handler) ReportTaskStatus(c *gin.Context) {
 }
 
 func (h *Handler) UploadTaskResult(c *gin.Context) {
-    ctx := context.Background()
-    id := c.Param("id")
+	ctx := context.Background()
+	id := c.Param("id")
+	taskKey := "task:" + id
 
-    // 确认 task 存在
-    m, err := h.S.Store.GetTask(ctx, id)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "redis error", "detail": err.Error()})
-        return
-    }
-    if len(m) == 0 {
-        c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
-        return
-    }
+	// 1) 确认 task 存在
+	m, err := h.S.Store.GetTask(ctx, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "redis error", "detail": err.Error()})
+		return
+	}
+	if len(m) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
 
-    if err := ensureDirs(h.S.DataDir); err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create data dirs", "detail": err.Error()})
-        return
-    }
+	// 2) 读取上传 attempt
+	attemptStr := strings.TrimSpace(c.PostForm("attempt"))
+	if attemptStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "attempt is required"})
+		return
+	}
+	uploadAttempt, err := strconv.Atoi(attemptStr)
+	if err != nil || uploadAttempt <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid attempt"})
+		return
+	}
 
-    fh, err := c.FormFile("result_file")
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "result_file is required"})
-        return
-    }
+	// 3) 读取 Redis 当前 attempt
+	curAttemptStr, err := h.S.RDB.HGet(ctx, taskKey, "attempt").Result()
+	if err != nil && err != redis.Nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "redis error", "detail": err.Error()})
+		return
+	}
+	curAttempt := 0
+	if curAttemptStr != "" {
+		if n, convErr := strconv.Atoi(curAttemptStr); convErr == nil {
+			curAttempt = n
+		}
+	}
 
-    resultName := id + "_result.zip"
-    resultPath := filepath.Join(h.S.resultsDir(), resultName)
+	// 4) stale attempt：直接拒绝，避免旧结果覆盖新结果
+	if uploadAttempt < curAttempt {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":          "stale attempt",
+			"upload_attempt": uploadAttempt,
+			"current_attempt": curAttempt,
+		})
+		return
+	}
+
+	// 5) 保存文件
+	if err := ensureDirs(h.S.DataDir); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create data dirs", "detail": err.Error()})
+		return
+	}
+
+	fh, err := c.FormFile("result_file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "result_file is required"})
+		return
+	}
+
+	resultName := id + "_result.zip"
+	resultPath := filepath.Join(h.S.resultsDir(), resultName)
 
 	wd, _ := os.Getwd()
-	log.Printf("[api] wd=%s dataDir=%s resultsDir=%s resultPath=%s",
-		wd, h.S.DataDir, h.S.resultsDir(), resultPath,
+	log.Printf("[api] wd=%s dataDir=%s resultsDir=%s resultPath=%s uploadAttempt=%d curAttempt=%d",
+		wd, h.S.DataDir, h.S.resultsDir(), resultPath, uploadAttempt, curAttempt,
 	)
 
-    if err := c.SaveUploadedFile(fh, resultPath); err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save result zip", "detail": err.Error()})
+	if err := c.SaveUploadedFile(fh, resultPath); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save result zip", "detail": err.Error()})
 		log.Printf("[api] SaveUploadedFile failed: %v", err)
-        return
-    }
+		return
+	}
 	log.Printf("[api] SaveUploadedFile OK: %s", resultPath)
-	
-    now := time.Now().UTC().Format(time.RFC3339)
-    fields := map[string]any{
-        "result_name": resultName,
-        "status":      "success",
-        "phase":       "result_uploaded",
-        "progress":    100,
-        "updated_at":  now,
-        "finished_at": now,
-    }
-    if err := h.S.Store.UpdateTask(ctx, id, fields); err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update task", "detail": err.Error()})
-        return
-    }
 
-    c.JSON(http.StatusOK, gin.H{"status": "ok", "result_name": resultName})
+	// 6) 更新 Redis
+	now := time.Now().UTC().Format(time.RFC3339)
+	fields := map[string]any{
+		"result_name":    resultName,
+		"result_attempt": strconv.Itoa(uploadAttempt),
+		"phase":          "result_uploaded",
+		"updated_at":     now,
+	}
+	if err := h.S.Store.UpdateTask(ctx, id, fields); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update task", "detail": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":         "ok",
+		"result_name":    resultName,
+		"result_attempt": uploadAttempt,
+	})
 }
+
 
 func (h *Handler) DownloadTaskResult(c *gin.Context) {
     ctx := context.Background()

@@ -287,7 +287,7 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 			}).Err()
 
 			log.Printf("[worker] about to upload (failed): task_id=%s path=%s", taskID, resultZipPath)
-			if upErr := w.uploadResult(taskID, resultZipPath); upErr != nil {
+			if upErr := w.uploadResult(taskID, resultZipPath, attempt); upErr != nil {
 				upErr = fmt.Errorf("upload result failed: %w", upErr)
 
 				_ = w.reportStatus(taskID, statusPayload{
@@ -330,7 +330,7 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 
 	// 6) 上传 result.zip
 	log.Printf("[worker] about to upload: task_id=%s path=%s", taskID, resultZipPath)
-	if err := w.uploadResult(taskID, resultZipPath); err != nil {
+	if err := w.uploadResult(taskID, resultZipPath, attempt); err != nil {
 		err = fmt.Errorf("upload result failed: %w", err)
 		_ = w.reportStatus(taskID, statusPayload{
 			Phase:    "completed_failed",

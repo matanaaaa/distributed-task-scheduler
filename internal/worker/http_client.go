@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"log"
 )
 
 type statusPayload struct {
@@ -45,7 +47,7 @@ func (w *Worker) reportStatus(taskID string, p statusPayload) error {
 	return nil
 }
 
-func (w *Worker) uploadResult(taskID string, zipPath string) error {
+func (w *Worker) uploadResult(taskID, zipPath string, attempt int) error {
 	url := fmt.Sprintf("%s/tasks/%s/result", w.apiBaseURL, taskID)
 
 	f, err := os.Open(zipPath)
@@ -56,6 +58,10 @@ func (w *Worker) uploadResult(taskID string, zipPath string) error {
 
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
+
+	if err := writer.WriteField("attempt", strconv.Itoa(attempt)); err != nil {
+		return fmt.Errorf("write attempt field: %w", err)
+	}
 
 	part, err := writer.CreateFormFile("result_file", filepath.Base(zipPath))
 	if err != nil {
@@ -79,6 +85,10 @@ func (w *Worker) uploadResult(taskID string, zipPath string) error {
 		return err
 	}
 	defer resp.Body.Close()
+
+	log.Printf("[worker] uploadResult resp: task_id=%s attempt=%d code=%d",
+		taskID, attempt, resp.StatusCode,
+	)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)

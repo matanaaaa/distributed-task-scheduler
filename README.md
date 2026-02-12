@@ -23,7 +23,7 @@ Worker:
 
 - `BLPOP` from queues (high first)
 - bounded concurrency worker pool (jobs channel + N consumers)
-- idempotency lock prevents duplicate execution
+- best-effort idempotency lock (SETNX+TTL) to reduce duplicate execution; result upload is protected by attempt gating (latest wins)
 - retries with exponential backoff on failure; after max retries, marks task as `dead` and pushes to `queue:dlq`
 - `POST /tasks/:id/status` (running → uploading → success/failed)
 - `POST /tasks/:id/result` upload result zip
@@ -83,7 +83,7 @@ Retry/DLQ:
 
 Rate limit (POST /tasks only):
 
-- `TASKS_RATE_LIMIT` (default: `3`)
+- `TASKS_RATE_LIMIT` (default: `20`)
 - `TASKS_RATE_WINDOW_SECONDS` (default: `10`)
 
 Zip security boundaries:
@@ -171,6 +171,11 @@ Notes:
   so users can always download /tasks/:id/result to debug without checking Redis.
 - metadata.json includes attempt, exit_code, timeout, duration_ms and error (if any).
 
+### Idempotency & result consistency (attempt gating)
+
+The worker uses a best-effort idempotency lock (SETNX + TTL), so duplicate execution may still happen (lock expiry / restart / network jitter).
+Each result upload includes an `attempt` number and the API only persists the **latest attempt** (stale uploads return `409 Conflict`).
+
 Sandbox env configuration
 
 Worker execution environment variables:
@@ -189,14 +194,14 @@ Notes:
 
 To protect the API/worker from malicious task archives (zip slip / zip bomb), the system enforces:
 
-- API ingress: request body + zip size limited to **20MB** (`TASK_ZIP_MAX_BYTES`)
+- API ingress: request body / upload size limited to **20MB** (`TASK_ZIP_MAX_BYTES`)
 - Worker unzip:
   - **Zip-slip detection**: reject entries that escape dstDir (e.g. `../evil.txt`, absolute paths)
   - **Total uncompressed limit**: **128MB** (`TASK_UNZIP_MAX_BYTES`)
   - **Per-entry uncompressed limit**: **32MB** (`TASK_UNZIP_ENTRY_MAX_BYTES`)
 
 If unzip is rejected, the worker still uploads `result.zip`,
-and `metadata.json.error` contains the exact reason.
+and `metadata.json.error` contains the exact reason (no files are written outside the work directory).
 
 ## Demo (Windows PowerShell)
 
@@ -336,43 +341,16 @@ Notes:
 - `dts_tasks_total{status="failed"}` counts each failed attempt (including retries)
 - `dts_tasks_total{status="dead"}` counts tasks moved to DLQ
 
-### (v0.7) Security tests
+### (v0.7) Security tests (zip boundaries)
 
-> Full scripts: `scripts/security/` (PowerShell)
+PowerShell scripts are provided under `scripts/security/`.
 
-#### A) Zip Slip (../evil.txt) should be rejected
+- Zip Slip: `../evil.txt` entry should be rejected (see `make_zipslip.ps1`).
+- Zip Bomb: total unzip > 128MB should be rejected (see `make_zipbomb.ps1`).
+- Single entry > 32MB should be rejected (see `make_entry40m.ps1`).
 
-```powershell
-pwsh .\scripts\security\make_zipslip.ps1
-$resp = curl.exe -s -F "task_type=demo" -F "priority=high" -F "task_file=@.\task_zipslip.zip" http://localhost:8090/tasks
-$taskId = ($resp | ConvertFrom-Json).task_id
-curl.exe -L -o .\result_zipslip.zip http://localhost:8090/tasks/$taskId/result
-Expand-Archive -Force -Path .\result_zipslip.zip -DestinationPath .\result_zipslip_unzipped
-Get-Content .\result_zipslip_unzipped\metadata.json
-Test-Path .\evil.txt   # should be False
-```
-
-#### B) Zip Bomb (total unzip > 128MB) should be rejected
-
-```powershell
-pwsh .\scripts\security\make_zipbomb.ps1
-$resp = curl.exe -s -F "task_type=demo" -F "priority=high" -F "task_file=@.\task_zipbomb.zip" http://localhost:8090/tasks
-$taskId = ($resp | ConvertFrom-Json).task_id
-curl.exe -L -o .\result_zipbomb.zip http://localhost:8090/tasks/$taskId/result
-Expand-Archive -Force -Path .\result_zipbomb.zip -DestinationPath .\result_zipbomb_unzipped
-Get-Content .\result_zipbomb_unzipped\metadata.json
-```
-
-#### C) Single entry > 32MB should be rejected
-
-```powershell
-pwsh .\scripts\security\make_entry40m.ps1
-$resp = curl.exe -s -F "task_type=demo" -F "priority=high" -F "task_file=@.\task_entry40m.zip" http://localhost:8090/tasks
-$taskId = ($resp | ConvertFrom-Json).task_id
-curl.exe -L -o .\result_entry40m.zip http://localhost:8090/tasks/$taskId/result
-Expand-Archive -Force -Path .\result_entry40m.zip -DestinationPath .\result_entry40m_unzipped
-Get-Content .\result_entry40m_unzipped\metadata.json
-```
+Verification: after submitting a malicious zip, download `/tasks/<task_id>/result`,
+then check `metadata.json.error` for the exact rejection reason.
 
 ## Changelog
 
