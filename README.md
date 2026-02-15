@@ -23,7 +23,7 @@ Worker:
 
 - `BLPOP` from queues (high first)
 - bounded concurrency worker pool (jobs channel + N consumers)
-- best-effort idempotency lock (SETNX+TTL) to reduce duplicate execution; result upload is protected by attempt gating (latest wins)
+- best-effort idempotency lock (SETNX+TTL) to reduce duplicate execution; result upload is protected by attempt gating (stale attempt → 409, latest wins)
 - retries with exponential backoff on failure; after max retries, marks task as `dead` and pushes to `queue:dlq`
 - `POST /tasks/:id/status` (running → uploading → success/failed)
 - `POST /tasks/:id/result` upload result zip
@@ -38,6 +38,19 @@ Worker:
 - Docker Compose
 
 ## Quick Start
+
+### Option A) Docker Compose (v0.8, recommended)
+
+Bring up the full stack (redis + api + workers) with one command.
+
+```powershell
+docker compose up -d --build --scale worker=3
+```
+
+API: http://localhost:8090
+Default execution mode: local (use_docker=false)
+
+### Option B) Manual (without compose)
 
 ### 1) Start Redis
 
@@ -69,7 +82,7 @@ Worker:
 
 - `WORKER_CONCURRENCY` (default: `4`)
 - `WORKER_HTTP_TIMEOUT_SECONDS` (default: `10`)
-- `TASK_EXEC_IMAGE` (default: ubuntu:22.04)
+- `TASK_EXEC_IMAGE` (only used when use_docker=true)
 - `TASK_EXEC_TIMEOUT_SECONDS` (default: 30)
 
 Idempotency lock:
@@ -105,9 +118,9 @@ $env:TASK_MAX_RETRY="5"
 go run .\cmd\worker\main.go
 ```
 
-## Task Contract & Execution (Docker sandbox)
+## Task Contract & Execution
 
-This project treats each task as a zip bundle that the worker executes inside a Docker sandbox. The contract ensures tasks are reproducible and isolated.
+This project treats each task as a zip bundle.
 
 ### Task zip format
 
@@ -135,7 +148,8 @@ Example run.sh behavior:
 
 ### How the worker runs a task
 
-The worker unzips task.zip into a per-task work directory (mounted into the container as /work) and runs:
+- **Local mode (default)**: unzip → `bash run.sh`
+- **Docker sandbox (optional)**: unzip → `docker run ... bash run.sh`
 
 ```bash
 docker run --rm \
@@ -365,3 +379,4 @@ then check `metadata.json.error` for the exact rejection reason.
 - v0.7: task contract + docker sandbox execution (run.sh + output/ + result)
   - v0.7.1: always upload result.zip even on failed attempts (timeout/exit!=0/contract/unzip/download), attempt tracking + docker sandbox hardening (name/network/resource limits)
   - v0.7.2: zip security boundaries (API upload limit + worker unzip zip-slip + size limits)
+- v0.8: Docker Compose one-command stack (redis + api + workers), worker horizontal scaling via `--scale worker=N`, and default local exec mode (`use_docker=false`) to run demos without docker-in-docker.

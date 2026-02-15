@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"errors"
+	"os/exec"
 )
 
 type execMeta struct {
@@ -20,6 +22,7 @@ type execMeta struct {
 	Timeout     bool   `json:"timeout"`
 	DurationMs  int64  `json:"duration_ms"`
 	Error       string `json:"error,omitempty"`
+	ExecMode  string `json:"exec_mode"`
 	ExecImage   string `json:"exec_image,omitempty"`
 }
 
@@ -33,13 +36,25 @@ func (w *Worker) buildResultZipFromTaskPackage(ctx context.Context, msg QueueMsg
 		return "", err
 	}
 
-	// result zip path 先确定（失败也要落这个）
+	// result zip path
 	resultZipPath := filepath.Join(w.dataDir, "tmp", fmt.Sprintf("%s_result.zip", taskID))
 	if err := os.MkdirAll(filepath.Dir(resultZipPath), 0755); err != nil {
 		return "", err
 	}
 
-	// 统一失败收尾：写 metadata + touch logs + zipResult
+	// 提前读取use_docker
+	useDockerStr, _ := w.RDB.HGet(ctx, "task:"+taskID, "use_docker").Result()
+	useDocker := strings.ToLower(strings.TrimSpace(useDockerStr)) == "true"
+
+	// meta字段
+	execMode := "local"
+	execImage := "local"
+	if useDocker {
+		execMode = "docker"
+		execImage = w.execImage
+	}
+
+	// 失败收尾：写 metadata + touch logs + zipResult
 	finalizeFailure := func(cause error) (string, error) {
 		_ = os.MkdirAll(filepath.Join(workDir, "output"), 0755)
 		_ = ensureFile(filepath.Join(workDir, "stdout.log"))
@@ -51,12 +66,12 @@ func (w *Worker) buildResultZipFromTaskPackage(ctx context.Context, msg QueueMsg
 			ExitCode:   -1,
 			Timeout:    false,
 			DurationMs: 0,
-			ExecImage:  w.execImage,
+			ExecMode:   execMode,
+			ExecImage:  execImage,
 			Error:      cause.Error(),
 		}
 		_ = writeJSON(filepath.Join(workDir, "metadata.json"), meta)
 
-		// 即使 zip 失败，也要把原 cause 往上抛；zipErr 只做补充信息
 		if zipErr := zipResult(resultZipPath, workDir, []string{
 			"output",
 			"stdout.log",
@@ -78,7 +93,6 @@ func (w *Worker) buildResultZipFromTaskPackage(ctx context.Context, msg QueueMsg
 		return finalizeFailure(fmt.Errorf("unzip task zip: %w", err))
 	}
 
-
 	runSh := filepath.Join(workDir, "run.sh")
 	if _, err := os.Stat(runSh); err != nil {
 		return finalizeFailure(fmt.Errorf("task contract violated: missing run.sh"))
@@ -88,12 +102,20 @@ func (w *Worker) buildResultZipFromTaskPackage(ctx context.Context, msg QueueMsg
 	outputDir := filepath.Join(workDir, "output")
 	_ = os.MkdirAll(outputDir, 0755)
 
-	// 6) run in docker
+	// 6) run
 	stdoutPath := filepath.Join(workDir, "stdout.log")
 	stderrPath := filepath.Join(workDir, "stderr.log")
 
+	var exitCode int
+	var timeout bool
+	var runErr error
+
 	start := time.Now()
-	exitCode, timeout, runErr := w.runDocker(ctx, taskID, attempt, workDir, stdoutPath, stderrPath)
+	if useDocker {
+		exitCode, timeout, runErr = w.runDocker(ctx, taskID, attempt, workDir, stdoutPath, stderrPath)
+	} else {
+		exitCode, timeout, runErr = w.runLocal(ctx, workDir, stdoutPath, stderrPath)
+	}
 	dur := time.Since(start)
 
 	meta := execMeta{
@@ -102,17 +124,15 @@ func (w *Worker) buildResultZipFromTaskPackage(ctx context.Context, msg QueueMsg
 		ExitCode:   exitCode,
 		Timeout:    timeout,
 		DurationMs: dur.Milliseconds(),
-		ExecImage:  w.execImage, 
+		ExecMode:   execMode,
+		ExecImage:  execImage,
 	}
 	if runErr != nil {
 		meta.Error = runErr.Error()
 	}
+	_ = writeJSON(filepath.Join(workDir, "metadata.json"), meta)
 
-	metaPath := filepath.Join(workDir, "metadata.json")
-	_ = writeJSON(metaPath, meta)
-
-	// 7) pack result.zip (output/ + logs + metadata)
-	
+	// 7) pack result.zip
 	if err := zipResult(resultZipPath, workDir, []string{
 		"output",
 		"stdout.log",
@@ -122,12 +142,141 @@ func (w *Worker) buildResultZipFromTaskPackage(ctx context.Context, msg QueueMsg
 		return "", err
 	}
 
-	// 8) if run failed, still return zip + error (让上层走 retry/DLQ)
+	// 8) if run failed, return zip + error
 	if runErr != nil || exitCode != 0 || timeout {
 		return resultZipPath, fmt.Errorf("task exec failed: exit_code=%d timeout=%v err=%v", exitCode, timeout, runErr)
 	}
 	return resultZipPath, nil
 }
+
+
+
+func (w *Worker) runDocker(ctx context.Context, taskID string, attempt int, workDir, stdoutPath, stderrPath string) (exitCode int, timeout bool, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, w.execTimeout)
+	defer cancel()
+
+	// 1) stdout/stderr file
+	if err := os.MkdirAll(filepath.Dir(stdoutPath), 0755); err != nil {
+		return -1, false, fmt.Errorf("mkdir stdout dir: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stderrPath), 0755); err != nil {
+		return -1, false, fmt.Errorf("mkdir stderr dir: %w", err)
+	}
+
+	stdoutFile, err := os.Create(stdoutPath)
+	if err != nil {
+		return -1, false, fmt.Errorf("create stdout.log: %w", err)
+	}
+	defer stdoutFile.Close()
+
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		return -1, false, fmt.Errorf("create stderr.log: %w", err)
+	}
+	defer stderrFile.Close()
+
+	// 2) workdir path
+	absWork, err := filepath.Abs(workDir)
+	if err != nil {
+		return -1, false, fmt.Errorf("abs workdir: %w", err)
+	}
+	hostPath := strings.ReplaceAll(absWork, `\`, `/`)
+
+	// 3) container name: task_<taskID>_attempt_<attempt>
+	// docker name 只能用 [a-zA-Z0-9][a-zA-Z0-9_.-]，UUID 里的 '-' 没问题
+	containerName := fmt.Sprintf("task_%s_attempt_%d", taskID, attempt)
+
+	// 4) docker args
+	args := []string{
+		"run", "--rm",
+		"--name", containerName,
+
+		// (2) 默认禁网：减少攻击面/外部依赖
+		"--network", "none",
+
+		// (3) 资源限制：防卡死/防炸机器
+		"--cpus", "1",
+		"--memory", "512m",
+
+		"-v", fmt.Sprintf("%s:/work", hostPath),
+		"-w", "/work",
+		w.execImage,
+		"bash", "run.sh",
+	}
+
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Stdout = stdoutFile
+	cmd.Stderr = stderrFile
+
+	runErr := cmd.Run()
+
+	// 5) 超时：明确标记 + 兜底强杀容器
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		_ = exec.Command("docker", "rm", "-f", containerName).Run()
+		return -1, true, fmt.Errorf("timeout: %w", runErr)
+	}
+
+	// 6) 正常错误：拿 exit code
+	if runErr != nil {
+		var ee *exec.ExitError
+		if errors.As(runErr, &ee) {
+			return ee.ExitCode(), false, runErr
+		}
+		return -1, false, runErr
+	}
+
+	return 0, false, nil
+}
+
+func (w *Worker) runLocal(ctx context.Context, workDir, stdoutPath, stderrPath string) (exitCode int, timeout bool, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, w.execTimeout)
+	defer cancel()
+
+	if err := os.MkdirAll(filepath.Dir(stdoutPath), 0755); err != nil {
+		return -1, false, fmt.Errorf("mkdir stdout dir: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stderrPath), 0755); err != nil {
+		return -1, false, fmt.Errorf("mkdir stderr dir: %w", err)
+	}
+
+	stdoutFile, err := os.Create(stdoutPath)
+	if err != nil {
+		return -1, false, fmt.Errorf("create stdout.log: %w", err)
+	}
+	defer stdoutFile.Close()
+
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		return -1, false, fmt.Errorf("create stderr.log: %w", err)
+	}
+	defer stderrFile.Close()
+
+	cmd := exec.CommandContext(ctx, "bash", "run.sh")
+	cmd.Dir = workDir
+	cmd.Stdout = stdoutFile
+	cmd.Stderr = stderrFile
+
+	runErr := cmd.Run()
+
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return -1, true, fmt.Errorf("timeout: %w", runErr)
+	}
+	if runErr != nil {
+		var ee *exec.ExitError
+		if errors.As(runErr, &ee) {
+			return ee.ExitCode(), false, runErr
+		}
+		return -1, false, runErr
+	}
+	return 0, false, nil
+}
+
 
 // -------- helpers --------
 

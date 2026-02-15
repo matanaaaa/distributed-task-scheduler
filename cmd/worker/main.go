@@ -22,7 +22,7 @@ func main() {
 		log.Fatalf("[worker] redis ping failed: %v", err)
 	}
 
-	apiBase := "http://localhost:8090"
+	apiBase := cfg.APIBaseURL
 
 	w := worker.New(rdb, apiBase, cfg.DataDir, time.Duration(cfg.WorkerHTTPTimeoutSeconds)*time.Second)
 	

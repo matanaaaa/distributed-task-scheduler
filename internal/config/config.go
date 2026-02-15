@@ -9,6 +9,8 @@ type Config struct {
 	HTTPAddr  string
 	RedisAddr string
 	DataDir   string
+	APIBaseURL string
+
 
 	// Worker
 	WorkerConcurrency        int
@@ -41,6 +43,8 @@ func Load() Config {
 		HTTPAddr:  getEnv("HTTP_ADDR", ":8090"),
 		RedisAddr: getEnv("REDIS_ADDR", "localhost:6379"),
 		DataDir:   getEnv("DATA_DIR", "data"),
+		APIBaseURL: getEnv("API_BASE_URL", "http://localhost:8090"),
+
 
 		WorkerConcurrency:        getEnvInt("WORKER_CONCURRENCY", 4),
 		WorkerHTTPTimeoutSeconds: getEnvInt("WORKER_HTTP_TIMEOUT_SECONDS", 10),
