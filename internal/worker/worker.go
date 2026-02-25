@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -12,13 +11,6 @@ import (
 
 	"github.com/redis/go-redis/v9"
 )
-
-type QueueMsg struct {
-	TaskID    string `json:"task_id"`
-	ZipName   string `json:"zip_name"`
-	TaskType  string `json:"task_type,omitempty"`
-	Priority  string `json:"priority,omitempty"`
-}
 
 type Worker struct {
 	RDB         *redis.Client
@@ -41,6 +33,13 @@ type Worker struct {
 	unzipMaxBytes      int64 // total uncompressed limit
 	unzipEntryMaxBytes int64 // per entry uncompressed limit
 }
+
+const (
+	qHigh     = "queue:high"
+	qNormal   = "queue:normal"
+	qInflight = "queue:inflight"
+	zProc     = "z:processing"
+)
 
 func New(rdb *redis.Client, apiBaseURL, dataDir string, httpTimeout time.Duration) *Worker {
 	host, _ := os.Hostname()
@@ -113,6 +112,45 @@ func (w *Worker) SetUnzipLimits(maxTotal, maxEntry int64) {
 	w.unzipEntryMaxBytes = maxEntry
 }
 
+func (w *Worker) visibilityTimeout() time.Duration {
+    // 直接跟锁 TTL 对齐
+    return w.lockTTL
+}
+
+func (w *Worker) claimOne(ctx context.Context) (taskID string, fromQ string, err error) {
+	// 先 high（短超时）
+	v, err := w.RDB.BRPopLPush(ctx, qHigh, qInflight, 1*time.Second).Result()
+	if err == nil {
+		return v, qHigh, nil
+	}
+	if err != redis.Nil {
+		return "", "", err
+	}
+
+	// 再 normal（短超时）
+	v, err = w.RDB.BRPopLPush(ctx, qNormal, qInflight, 1*time.Second).Result()
+	if err == nil {
+		return v, qNormal, nil
+	}
+	if err == redis.Nil {
+		return "", "", nil
+	}
+	return "", "", err
+}
+
+func (w *Worker) markProcessing(ctx context.Context, taskID string) error {
+	deadline := time.Now().Add(w.visibilityTimeout()).Unix()
+	return w.RDB.ZAdd(ctx, zProc, redis.Z{
+		Score:  float64(deadline),
+		Member: taskID,
+	}).Err()
+}
+
+func (w *Worker) ackQueueState(ctx context.Context, taskID string) {
+	_ = w.RDB.LRem(ctx, qInflight, 1, taskID).Err()
+	_ = w.RDB.ZRem(ctx, zProc, taskID).Err()
+}
+
 
 func (w *Worker) Run(ctx context.Context) error {
 	concurrency := w.concurrency
@@ -120,9 +158,10 @@ func (w *Worker) Run(ctx context.Context) error {
 	log.Printf("[worker] started. waiting for tasks... api=%s worker_id=%s concurrency=%d",
 		w.apiBaseURL, w.workerID, concurrency)
 
-	jobs := make(chan QueueMsg, concurrency*2) // 有一点 buffer，形成背压但不至于太抖
+	jobs := make(chan string, concurrency*2)
 	var wg sync.WaitGroup
 
+	go w.watchdog(ctx)
 	// consumers
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
@@ -130,12 +169,21 @@ func (w *Worker) Run(ctx context.Context) error {
 			defer wg.Done()
 			log.Printf("[worker] consumer-%d started", idx)
 
-			for msg := range jobs {
-				log.Printf("[worker] consumer-%d handling task_id=%s", idx, msg.TaskID)
-				if err := w.handleOne(ctx, msg); err != nil {
-					log.Printf("[worker] consumer-%d task failed: task_id=%s err=%v", idx, msg.TaskID, err)
-					w.onTaskFailed(ctx, msg, err)
+			for taskID := range jobs {
+				log.Printf("[worker] consumer-%d handling task_id=%s", idx, taskID)
+
+				if err := w.handleOne(ctx, taskID); err != nil {
+					log.Printf("[worker] consumer-%d task failed: task_id=%s err=%v", idx, taskID, err)
+
+					// 失败也要 ack（防 inflight 堆积 / watchdog 误重投）
+					w.ackQueueState(context.Background(), taskID)
+
+					w.onTaskFailed(ctx, taskID, err)
+					continue
 				}
+
+				// 成功也要 ack
+				w.ackQueueState(context.Background(), taskID)
 			}
 
 			log.Printf("[worker] consumer-%d stopped", idx)
@@ -146,46 +194,44 @@ func (w *Worker) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			// 触发优雅退出：不再拉新任务，关闭 jobs，让 consumers 退出
 			close(jobs)
 			wg.Wait()
 			return ctx.Err()
 		default:
 		}
 
-		res, err := w.RDB.BLPop(ctx, 0, "queue:high", "queue:normal").Result()
+		taskID, fromQ, err := w.claimOne(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				close(jobs)
 				wg.Wait()
 				return ctx.Err()
 			}
-			log.Printf("[worker] BLPOP error: %v", err)
+			log.Printf("[worker] BRPOPLPUSH error: %v", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
-		if len(res) != 2 {
+
+		if taskID == "" {
+			// short-timeout miss
 			continue
 		}
 
-		queueName := res[0]
-		raw := res[1]
+		log.Printf("[worker] claimed task_id=%s from %s -> %s", taskID, fromQ, qInflight)
 
-		var msg QueueMsg
-		if err := json.Unmarshal([]byte(raw), &msg); err != nil {
-			log.Printf("[worker] invalid queue msg: %v, raw=%s", err, raw)
+		// 立刻写 zset deadline
+		if err := w.markProcessing(ctx, taskID); err != nil {
+			log.Printf("[worker] markProcessing failed: task_id=%s err=%v", taskID, err)
+
+			// 防止 inflight 卡住：清理后 requeue 回原队列
+			w.ackQueueState(context.Background(), taskID)
+			_ = w.RDB.RPush(context.Background(), fromQ, taskID).Err()
 			continue
 		}
-		if msg.TaskID == "" {
-			log.Printf("[worker] missing task_id, raw=%s", raw)
-			continue
-		}
 
-		log.Printf("[worker] picked task_id=%s from %s zip=%s", msg.TaskID, queueName, msg.ZipName)
-
-		// 背压点：jobs 满了会阻塞 producer → 自然控吞吐
+		// 背压点：jobs 满了会阻塞 producer
 		select {
-		case jobs <- msg:
+		case jobs <- taskID:
 		case <-ctx.Done():
 			close(jobs)
 			wg.Wait()
@@ -194,8 +240,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
-	taskID := msg.TaskID
+func (w *Worker) handleOne(ctx context.Context, taskID string) error {
 	taskKey := "task:" + taskID
 
 	// === 幂等锁：防并发重复执行 ===
@@ -204,7 +249,8 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 		return fmt.Errorf("acquire task lock failed: %w", err)
 	}
 	if !ok {
-		// 抢不到锁：说明同一任务正在被其它 worker 跑（或刚跑过/重试并发）
+		// 抢不到锁：说明同一任务正在被其它 worker 跑
+		log.Printf("[worker] skip task (lock not acquired): task_id=%s", taskID)
 		return nil
 	}
 	// 用 Background，避免 ctx cancel 导致锁无法释放
@@ -255,7 +301,7 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 		attemptN = 1
 	}
 	attempt := int(attemptN)
-	resultZipPath, err := w.buildResultZipFromTaskPackage(ctx, msg, attempt)
+	resultZipPath, err := w.buildResultZipFromTaskPackage(ctx, taskID, attempt)
 
 	if err != nil {
 		_ = w.reportStatus(taskID, statusPayload{
@@ -374,4 +420,78 @@ func (w *Worker) handleOne(ctx context.Context, msg QueueMsg) error {
 
 	log.Printf("[worker] done task_id=%s result=%s", taskID, filepath.Base(resultZipPath))
 	return nil
+}
+
+func (w *Worker) watchdog(ctx context.Context) {
+    ticker := time.NewTicker(5 * time.Second)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+        }
+
+        now := time.Now().Unix()
+
+        // 批量拿超时 taskID
+        ids, err := w.RDB.ZRangeByScore(ctx, zProc, &redis.ZRangeBy{
+            Min:   "-inf",
+            Max:   fmt.Sprintf("%d", now),
+            Count: 50,
+        }).Result()
+        if err != nil {
+            if ctx.Err() != nil {
+                return
+            }
+            log.Printf("[watchdog] zrangebyscore error: %v", err)
+            continue
+        }
+        if len(ids) == 0 {
+            continue
+        }
+
+        for _, taskID := range ids {
+            taskKey := "task:" + taskID
+
+            // 读 priority
+            pri, _ := w.RDB.HGet(ctx, taskKey, "priority").Result()
+            if pri != "high" {
+                pri = "normal"
+            }
+            targetQ := qNormal
+            if pri == "high" {
+                targetQ = qHigh
+            }
+
+            // 使用 Lua 脚本执行原子操作
+            luaScript := `
+                local task_id = KEYS[1]
+                local zset_key = KEYS[2]
+                local inflight_key = KEYS[3]
+                local target_queue = KEYS[4]
+                
+                local task_exists = redis.call('ZREM', zset_key, task_id)
+                if task_exists == 0 then
+                    return "task not found in zset"
+                end
+                
+                local inflight_exists = redis.call('LREM', inflight_key, 1, task_id)
+                if inflight_exists == 0 then
+                    return "task not in inflight"
+                end
+                
+                redis.call('RPUSH', target_queue, task_id)
+                redis.call('HINCRBY', 'metrics:tasks', 'timeout_requeue_total', 1)
+                return "task requeued"
+            `
+            result, err := w.RDB.Eval(ctx, luaScript, []string{taskID, zProc, qInflight, targetQ}).Result()
+            if err != nil {
+                log.Printf("[watchdog] Lua script error: %v", err)
+                continue
+            }
+            log.Printf("[watchdog] Lua script result: %s", result)
+        }
+    }
 }

@@ -73,17 +73,17 @@ func (h *Handler) Metrics(c *gin.Context) {
     qHigh, _ := h.S.RDB.LLen(ctx, "queue:high").Result()
     qNormal, _ := h.S.RDB.LLen(ctx, "queue:normal").Result()
     qDLQ, _ := h.S.RDB.LLen(ctx, "queue:dlq").Result()
+    qInflight, _ := h.S.RDB.LLen(ctx, "queue:inflight").Result()
+    zProcSize, _ := h.S.RDB.ZCard(ctx, "z:processing").Result()
 
     // counters
     m, _ := h.S.RDB.HGetAll(ctx, "metrics:tasks").Result()
 
-    // helper: string->int64
     get := func(k string) int64 {
         v := m[k]
         if v == "" {
             return 0
         }
-        // 最小：不严格处理 parse error
         var n int64
         fmt.Sscanf(v, "%d", &n)
         return n
@@ -93,18 +93,25 @@ func (h *Handler) Metrics(c *gin.Context) {
     success := get("success_total")
     failed := get("failed_total")
     dead := get("dead_total")
+    timeoutRequeue := get("timeout_requeue_total")
 
     c.Header("Content-Type", "text/plain; charset=utf-8")
 
-    // Prometheus-like format
     c.String(http.StatusOK, ""+
         "# TYPE dts_queue_length gauge\n"+
         fmt.Sprintf("dts_queue_length{queue=\"high\"} %d\n", qHigh)+
         fmt.Sprintf("dts_queue_length{queue=\"normal\"} %d\n", qNormal)+
+        fmt.Sprintf("dts_queue_length{queue=\"inflight\"} %d\n", qInflight)+
         fmt.Sprintf("dts_queue_length{queue=\"dlq\"} %d\n", qDLQ)+
+        "\n"+
+        "# TYPE dts_processing_zset_size gauge\n"+
+        fmt.Sprintf("dts_processing_zset_size %d\n", zProcSize)+
         "\n"+
         "# TYPE dts_tasks_processing gauge\n"+
         fmt.Sprintf("dts_tasks_processing %d\n", processing)+
+        "\n"+
+        "# TYPE dts_timeout_requeue_total counter\n"+
+        fmt.Sprintf("dts_timeout_requeue_total %d\n", timeoutRequeue)+
         "\n"+
         "# TYPE dts_tasks_total counter\n"+
         fmt.Sprintf("dts_tasks_total{status=\"success\"} %d\n", success)+

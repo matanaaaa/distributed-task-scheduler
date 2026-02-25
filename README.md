@@ -12,6 +12,8 @@ Redis:
 - **Hash**: `task:{id}` (task metadata & status)
 - **Lock**: `lock:task:{id}` (SETNX+TTL + Lua release)
 - **DLQ**: `queue:dlq` (moved here after max retries)
+- **In-flight queue**: `queue:inflight` (tasks in progress)
+- **Processing**: `z:processing` (sorted set, tracks tasks currently being processed with timestamps)
 
 Disk:
 
@@ -21,20 +23,22 @@ Disk:
 
 Worker:
 
-- `BLPOP` from queues (high first)
-- bounded concurrency worker pool (jobs channel + N consumers)
-- best-effort idempotency lock (SETNX+TTL) to reduce duplicate execution; result upload is protected by attempt gating (stale attempt → 409, latest wins)
-- retries with exponential backoff on failure; after max retries, marks task as `dead` and pushes to `queue:dlq`
-- `POST /tasks/:id/status` (running → uploading → success/failed)
-- `POST /tasks/:id/result` upload result zip
-- `GET /tasks/:id/result` download result zip
-- `GET /healthz`: basic health check (Redis ping + data dir writable)
-- `GET /metrics`: plain text metrics (queue length + processing gauge + task counters)
+- **BLPOP from queues** (high first)
+- **Bounded concurrency worker pool** (jobs channel + N consumers)
+- **Best-effort idempotency lock** (SETNX + TTL) to reduce duplicate execution
+- **Result upload** is protected by attempt gating (stale attempt → 409, latest wins)
+- **Retries with exponential backoff on failure**; after max retries, marks task as `dead` and pushes to `queue:dlq`
+- **Watchdog mechanism**: Monitors tasks in inflight and processing queues, requeues timed-out tasks to their respective priority queues
+- **POST /tasks/:id/status** (running → uploading → success/failed)
+- **POST /tasks/:id/result** upload result zip
+- **GET /tasks/:id/result** download result zip
+- **GET /healthz**: basic health check (Redis ping + data dir writable)
+- **GET /metrics**: plain text metrics (queue length + processing gauge + task counters)
 
 ## Tech Stack
 
 - Go + Gin
-- Redis (List/Hash)
+- Redis (List/Hash/Sorted Set)
 - Docker Compose
 
 ## Quick Start
@@ -380,3 +384,4 @@ then check `metadata.json.error` for the exact rejection reason.
   - v0.7.1: always upload result.zip even on failed attempts (timeout/exit!=0/contract/unzip/download), attempt tracking + docker sandbox hardening (name/network/resource limits)
   - v0.7.2: zip security boundaries (API upload limit + worker unzip zip-slip + size limits)
 - v0.8: Docker Compose one-command stack (redis + api + workers), worker horizontal scaling via `--scale worker=N`, and default local exec mode (`use_docker=false`) to run demos without docker-in-docker.
+- v0.9: Added watchdog mechanism for monitoring tasks in inflight and processing queues; requeues timed-out tasks back to their respective priority queues.

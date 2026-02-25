@@ -108,12 +108,7 @@ func (h *Handler) CreateTask(c *gin.Context) {
 	}
 
 	// RPUSH queue
-	if err := h.S.Store.Enqueue(ctx, priority, store.QueueMessage{
-		TaskID:   id,
-		ZipName: zipName,
-		TaskType: taskType,
-		Priority: priority,
-	}); err != nil {
+	if err := h.S.Store.Enqueue(ctx, priority, id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to enqueue", "detail": err.Error()})
 		return
 	}

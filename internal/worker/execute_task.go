@@ -26,18 +26,17 @@ type execMeta struct {
 	ExecImage   string `json:"exec_image,omitempty"`
 }
 
-func (w *Worker) buildResultZipFromTaskPackage(ctx context.Context, msg QueueMsg, attempt int) (string, error) {
-	taskID := msg.TaskID
+func (w *Worker) buildResultZipFromTaskPackage(ctx context.Context, taskID string, attempt int) (string, error) {
 
 	// 1) workdir
-	workDir := filepath.Join(w.dataDir, "work", taskID)
+	workDir := filepath.Join(w.dataDir, "work", taskID, fmt.Sprintf("attempt_%d", attempt))
 	_ = os.RemoveAll(workDir)
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		return "", err
 	}
 
 	// result zip path
-	resultZipPath := filepath.Join(w.dataDir, "tmp", fmt.Sprintf("%s_result.zip", taskID))
+	resultZipPath := filepath.Join(w.dataDir, "tmp", fmt.Sprintf("%s_attempt_%d_result.zip", taskID, attempt))
 	if err := os.MkdirAll(filepath.Dir(resultZipPath), 0755); err != nil {
 		return "", err
 	}

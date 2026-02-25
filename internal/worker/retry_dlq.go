@@ -2,10 +2,8 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"time"
 )
 
@@ -13,14 +11,13 @@ const (
 	dlqQueue        = "queue:dlq"
 )
 
-func (w *Worker) onTaskFailed(ctx context.Context, msg QueueMsg, cause error) {
-	taskID := msg.TaskID
+func (w *Worker) onTaskFailed(ctx context.Context, taskID string, cause error) {
 	taskKey := "task:" + taskID
 
-	// failed_total +1
+	// failed_total +1（每次失败 attempt 计一次）
 	_ = w.RDB.HIncrBy(ctx, "metrics:tasks", "failed_total", 1).Err()
-	// 1) retry_count++
-	// HINCRBY 会在字段不存在时按 0 处理，非常适合最小实现
+
+	// retry_count++
 	retryCount, err := w.RDB.HIncrBy(ctx, taskKey, "retry_count", 1).Result()
 	if err != nil {
 		log.Printf("[worker] retry HINCRBY failed: task_id=%s err=%v", taskID, err)
@@ -36,40 +33,56 @@ func (w *Worker) onTaskFailed(ctx context.Context, msg QueueMsg, cause error) {
 		"updated_at":   now,
 	}).Err()
 
+	// 读 priority（队列只存 taskID，所以从 task hash 取）
+	pri, _ := w.RDB.HGet(ctx, taskKey, "priority").Result()
+	if pri != "high" {
+		pri = "normal"
+	}
+
 	if retryCount <= maxRetry {
-		// 2) 进入 retrying 状态
+		// 进入 retrying 状态
 		_ = w.RDB.HSet(ctx, taskKey, map[string]any{
-			"status":   "retrying",
-			"phase":    "retrying",
-			"msg":      fmt.Sprintf("retrying (%d/%d): %v", retryCount, maxRetry, cause),
-			"progress": "0",
+			"status":     "retrying",
+			"phase":      "retrying",
+			"msg":        fmt.Sprintf("retrying (%d/%d): %v", retryCount, maxRetry, cause),
+			"progress":   "0",
 			"updated_at": now,
 		}).Err()
 
-		// 3) backoff（指数退避，上限 10s）
+		// backoff（指数退避，上限 10s）
 		d := retryBackoff(w.retryBase, int(retryCount), 10*time.Second)
 		log.Printf("[worker] retry scheduled: task_id=%s retry=%d/%d backoff=%s",
 			taskID, retryCount, maxRetry, d)
 
-		time.Sleep(d)
+		taskKeyLocal := taskKey
+		retryCountLocal := retryCount
+		maxRetryLocal := maxRetry
 
-		// 4) 重新入队（按 priority 回 high/normal）
-		if err := w.enqueue(ctx, msg); err != nil {
-			log.Printf("[worker] enqueue retry failed: task_id=%s err=%v", taskID, err)
-		}
+		go func(taskID, pri, taskKey string, retryCount, maxRetry int64, d time.Duration) {
+			time.Sleep(d)
+
+			_ = w.RDB.HSet(context.Background(), taskKey, map[string]any{
+				"status":     "queued",
+				"phase":      "queued",
+				"msg":        fmt.Sprintf("requeued (%d/%d)", retryCount, maxRetry),
+				"updated_at": time.Now().UTC().Format(time.RFC3339),
+			}).Err()
+
+			if err := w.enqueueTaskID(context.Background(), taskID, pri); err != nil {
+				log.Printf("[worker] enqueue retry failed: task_id=%s err=%v", taskID, err)
+			}
+		}(taskID, pri, taskKeyLocal, retryCountLocal, maxRetryLocal, d)
+
 		return
 	}
 
-	// 5) 超过 max_retry：进 DLQ + 标记 dead
-	raw, _ := json.Marshal(msg)
-	if err := w.RDB.LPush(ctx, dlqQueue, string(raw)).Err(); err != nil {
+	// 超过 max_retry：进 DLQ（建议 DLQ 也只存 taskID）
+	if err := w.RDB.RPush(ctx, dlqQueue, taskID).Err(); err != nil {
 		log.Printf("[worker] push to dlq failed: task_id=%s err=%v", taskID, err)
 		return
 	}
 
-	// dead_total +1（最终失败次数）
 	_ = w.RDB.HIncrBy(ctx, "metrics:tasks", "dead_total", 1).Err()
-
 
 	_ = w.RDB.HSet(ctx, taskKey, map[string]any{
 		"status":      "dead",
@@ -83,23 +96,21 @@ func (w *Worker) onTaskFailed(ctx context.Context, msg QueueMsg, cause error) {
 	log.Printf("[worker] moved to dlq: task_id=%s retry_count=%d", taskID, retryCount)
 }
 
-func (w *Worker) enqueue(ctx context.Context, msg QueueMsg) error {
-	queue := "queue:normal"
-	if msg.Priority == "high" {
-		queue = "queue:high"
+func (w *Worker) enqueueTaskID(ctx context.Context, taskID string, priority string) error {
+	queue := qNormal
+	if priority == "high" {
+		queue = qHigh
 	}
 
-	raw, err := json.Marshal(msg)
-	if err != nil {
-		return err
-	}
-	return w.RDB.LPush(ctx, queue, string(raw)).Err()
+	return w.RDB.RPush(ctx, queue, taskID).Err()
 }
 
 func retryBackoff(base time.Duration, attempt int, max time.Duration) time.Duration {
-	// attempt=1 -> 1s, attempt=2 -> 2s, attempt=3 -> 4s ...
-	sec := float64(base) * math.Pow(2, float64(attempt-1))
-	d := time.Duration(sec)
+	if attempt < 1 {
+		attempt = 1
+	}
+	// base * 2^(attempt-1)
+	d := base * time.Duration(1<<uint(attempt-1))
 	if d > max {
 		return max
 	}

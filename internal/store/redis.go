@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -38,24 +37,10 @@ func (s *RedisStore) GetTask(ctx context.Context, id string) (map[string]string,
 	return s.rdb.HGetAll(ctx, taskKey(id)).Result()
 }
 
-type QueueMessage struct {
-	TaskID   string `json:"task_id"`
-	ZipName  string `json:"zip_name"`
-	TaskType string `json:"task_type"`
-	Priority string `json:"priority"`
-}
-
-func (s *RedisStore) Enqueue(ctx context.Context, priority string, msg QueueMessage) error {
-	q := "queue:normal"
-	if priority == "high" {
-		q = "queue:high"
-	}
-	b, err := json.Marshal(msg)
-	if err != nil {
-		return err
-	}
-	// RPUSH queue:* {json}
-	return s.rdb.RPush(ctx, q, string(b)).Err()
+func (s *RedisStore) Enqueue(ctx context.Context, priority string, id string) error {
+  q := "queue:normal"
+  if priority == "high" { q = "queue:high" }
+  return s.rdb.RPush(ctx, q, id).Err()
 }
 
 func (s *RedisStore) TouchUpdatedAt(ctx context.Context, id string) error {

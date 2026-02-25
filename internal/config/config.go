@@ -54,7 +54,7 @@ func Load() Config {
 		TaskMaxRetry:         getEnvInt("TASK_MAX_RETRY", 3),
 		TaskRetryBaseSeconds: getEnvInt("TASK_RETRY_BASE_SECONDS", 1),
 
-		TasksRateLimit:         getEnvInt("TASKS_RATE_LIMIT", 20),
+		TasksRateLimit:         getEnvInt("TASKS_RATE_LIMIT", 20),//临时调大
 		TasksRateWindowSeconds: getEnvInt("TASKS_RATE_WINDOW_SECONDS", 10),
 
 		TaskExecImage:          getEnv("TASK_EXEC_IMAGE", "ubuntu:22.04"),
