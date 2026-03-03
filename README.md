@@ -23,7 +23,7 @@ Disk:
 
 Worker:
 
-- **BLPOP from queues** (high first)
+- **BRPopLPush from queues** (high first)
 - **Bounded concurrency worker pool** (jobs channel + N consumers)
 - **Best-effort idempotency lock** (SETNX + TTL) to reduce duplicate execution
 - **Result upload** is protected by attempt gating (stale attempt → 409, latest wins)
