@@ -1,4 +1,36 @@
+# 本地演示环境。
+#
+# 一个 MySQL 实例里放四个库：
+#   dts_meta   平台元数据（作业、执行、分片、对账、坏数据）
+#   crm        演示用源库（customer / contact，含 5000 条样例数据）
+#   marketing  演示用营销系统库
+#   analytics  演示用分析/报表库
+#
+# 生产环境这四者显然是分开的实例，这里合在一个容器里只为一条命令跑起来。
+#
+# 注意：下面的库口令是本地开发用的固定值，生产必须通过环境变量注入。
 services:
+  mysql:
+    image: mysql:8.0
+    # go-sql-driver 走明文 TCP 时用 native password 最省事；
+    # 该参数在 MySQL 8.4 已移除，所以镜像标签固定在 8.0
+    command: --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3306:3306"
+    volumes:
+      # 初始化脚本只在数据目录为空时执行一次；
+      # 改了 SQL 要重新初始化的话需先 docker compose down -v
+      - ./deployments/migrations:/docker-entrypoint-initdb.d:ro
+      - dts_mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [dtsnet]
+
   redis:
     image: redis:7
     healthcheck:
@@ -9,43 +41,42 @@ services:
     networks: [dtsnet]
 
   api:
-    user: "0:0"
     build:
       context: .
       dockerfile: Dockerfile.api
     environment:
-      REDIS_ADDR: redis:6379
-      DATA_DIR: /data
       HTTP_ADDR: :8090
-      TASKS_RATE_LIMIT: "100000"
-      TASKS_RATE_WINDOW_SECONDS: "10"
+      REDIS_ADDR: redis:6379
+      META_DSN: root:root@tcp(mysql:3306)/dts_meta?parseTime=true&loc=UTC&charset=utf8mb4
+      WRITE_RATE_LIMIT: "600"
+      WRITE_RATE_WINDOW_SECONDS: "10"
     ports:
       - "8090:8090"
-    volumes:
-      - dts_data:/data
     depends_on:
       redis:
+        condition: service_healthy
+      mysql:
         condition: service_healthy
     restart: on-failure
     networks: [dtsnet]
 
+  # 横向扩展：docker compose up --scale worker=3
   worker:
-    user: "0:0"
     build:
       context: .
       dockerfile: Dockerfile.worker
     environment:
       REDIS_ADDR: redis:6379
-      DATA_DIR: /data
-      API_BASE_URL: http://api:8090
+      META_DSN: root:root@tcp(mysql:3306)/dts_meta?parseTime=true&loc=UTC&charset=utf8mb4
       WORKER_CONCURRENCY: "4"
-    volumes:
-      - dts_data:/data
+      TASK_LOCK_TTL_SECONDS: "300"
+      TASK_MAX_RETRY: "3"
+      TASK_RETRY_BASE_SECONDS: "1"
     depends_on:
       redis:
         condition: service_healthy
-      api:
-        condition: service_started
+      mysql:
+        condition: service_healthy
     restart: on-failure
     networks: [dtsnet]
 
@@ -53,4 +84,4 @@ networks:
   dtsnet:
 
 volumes:
-  dts_data:
+  dts_mysql:

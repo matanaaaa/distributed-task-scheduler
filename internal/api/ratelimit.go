@@ -50,12 +50,14 @@ count = count + 1
 return {1, count, 0}
 `)
 
-func RateLimitPostTasks(rdb *redis.Client, cfg RateLimitConfig) gin.HandlerFunc {
+// RateLimitWrites 对写接口（创建作业、触发执行）做按 IP 的滑动窗口限流。
+// Redis 故障时放行而不是拒绝：限流组件不该成为主链路的单点。
+func RateLimitWrites(rdb *redis.Client, cfg RateLimitConfig) gin.HandlerFunc {
 	if cfg.Limit <= 0 || cfg.Window <= 0 || rdb == nil {
 		return func(c *gin.Context) { c.Next() }
 	}
 	if cfg.Prefix == "" {
-		cfg.Prefix = "rl:tasks:"
+		cfg.Prefix = "rl:write:"
 	}
 
 	return func(c *gin.Context) {
@@ -74,7 +76,7 @@ func RateLimitPostTasks(rdb *redis.Client, cfg RateLimitConfig) gin.HandlerFunc 
 		).Result()
 
 		if err != nil {
-			// 限流系统故障：放行，避免把 /tasks 打死（降级策略）
+			// 限流依赖故障时降级放行，不让它拖垮主链路
 			c.Next()
 			return
 		}
